@@ -36,12 +36,10 @@ function makeCardTexture(text: string, index: number) {
 
   ctx.font = '500 25px Inter, Arial, sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,0.42)';
-  ctx.letterSpacing = '4px';
   ctx.fillText(`ANONYMOUS / ${String(index + 1).padStart(3, '0')}`, 62, 72);
 
   ctx.font = '400 58px Inter, Arial, sans-serif';
   ctx.fillStyle = '#f0f2f5';
-  ctx.letterSpacing = '0px';
   wrapText(ctx, text, 62, 220, 850, 72);
 
   ctx.font = '500 21px Inter, Arial, sans-serif';
@@ -104,13 +102,10 @@ export default function App() {
     controls.maxPolarAngle = Math.PI * 0.66;
     controls.target.set(0, 0.25, -1.1);
 
-    const ambient = new THREE.HemisphereLight(0xe5ebf3, 0x11151a, 1.7);
-    scene.add(ambient);
-
+    scene.add(new THREE.HemisphereLight(0xe5ebf3, 0x11151a, 1.7));
     const key = new THREE.DirectionalLight(0xffffff, 3.0);
     key.position.set(-4, 6, 5);
     scene.add(key);
-
     const cool = new THREE.PointLight(0x547ba5, 14, 10);
     cool.position.set(4, 1.8, 1);
     scene.add(cool);
@@ -127,7 +122,7 @@ export default function App() {
     const cards = new THREE.Group();
     scene.add(cards);
 
-    const meshes: THREE.Object3D[] = [];
+    const meshes: THREE.Mesh[] = [];
     const textures: THREE.Texture[] = [];
     const geometries: THREE.BufferGeometry[] = [];
     const materials: THREE.Material[] = [];
@@ -145,15 +140,13 @@ export default function App() {
       mesh.position.set(...data.position);
       mesh.rotation.set(...data.rotation);
       mesh.userData.cardId = data.id;
-      mesh.castShadow = false;
-      mesh.receiveShadow = true;
       cards.add(mesh);
       meshes.push(mesh);
     });
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
-    let hovered: THREE.Object3D | null = null;
+    let hovered: THREE.Mesh | null = null;
 
     const setPointer = (event: PointerEvent) => {
       const rect = renderer.domElement.getBoundingClientRect();
@@ -192,6 +185,7 @@ export default function App() {
     observer.observe(mount);
 
     const clock = new THREE.Clock();
+    const baseY = CARDS.map((card) => card.position[1]);
     let frame = 0;
     const animate = () => {
       const t = clock.getElapsedTime();
@@ -199,17 +193,15 @@ export default function App() {
       meshes.forEach((mesh, index) => {
         const data = CARDS[index];
         const selected = openedRef.current?.id === data.id;
-        const targetScale = selected ? data.scale * 1.07 : data.scale;
-        const pulse = selected ? 1 + Math.sin(t * 2.2) * 0.006 : 1;
-        mesh.scale.lerp(new THREE.Vector3(targetScale * pulse, targetScale * pulse, targetScale * pulse), 0.08);
-        mesh.position.y += Math.sin(t * 0.45 + index) * 0.0008;
+        const targetScale = selected ? 1.07 : 1;
+        const nextScale = mesh.scale.x + (targetScale - mesh.scale.x) * 0.08;
+        mesh.scale.setScalar(nextScale);
+        mesh.position.y += (baseY[index] + Math.sin(t * 0.45 + index) * 0.035 - mesh.position.y) * 0.05;
       });
       raycaster.setFromCamera(pointer, camera);
-      const hit = raycaster.intersectObjects(meshes, false)[0]?.object ?? null;
+      const hit = raycaster.intersectObjects(meshes, false)[0]?.object as THREE.Mesh | undefined;
       if (hit !== hovered) {
-        if (hovered) hovered.scale.multiplyScalar(0.98);
-        hovered = hit;
-        if (hovered) hovered.scale.multiplyScalar(1.02);
+        hovered = hit ?? null;
         renderer.domElement.style.cursor = hovered ? 'pointer' : 'grab';
       }
       renderer.render(scene, camera);
