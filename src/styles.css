@@ -1,0 +1,95 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #e7e9ed;
+  background: #08090b;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { width: 100%; min-height: 100%; margin: 0; }
+body { min-width: 320px; background: #08090b; }
+button { font: inherit; }
+
+.prototype {
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  position: relative;
+  overflow: hidden;
+  padding: 32px;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(93,126,166,.08), transparent 34rem),
+    #08090b;
+}
+
+.prototype-label,
+.prototype-note {
+  position: fixed;
+  z-index: 3;
+  font-size: 10px;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: rgba(231,233,237,.42);
+}
+.prototype-label { top: 24px; left: 28px; }
+.prototype-note { bottom: 24px; left: 50%; transform: translateX(-50%); white-space: nowrap; }
+
+.spatial-card {
+  position: relative;
+  width: min(720px, 90vw);
+  aspect-ratio: 1.55;
+  padding: 0;
+  border: 0;
+  border-radius: 22px;
+  overflow: hidden;
+  cursor: pointer;
+  color: inherit;
+  background: transparent;
+  isolation: isolate;
+  transform: translateZ(0);
+  transition: transform 520ms cubic-bezier(.2,.8,.2,1), filter 520ms cubic-bezier(.2,.8,.2,1);
+}
+.spatial-card:hover { transform: scale(1.012) translateY(-2px); }
+.spatial-card.is-selected { transform: scale(1.025); }
+
+.card-canvas { position: absolute; inset: 0; }
+.card-canvas canvas { display: block; width: 100% !important; height: 100% !important; }
+
+.card-copy {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: flex-start;
+  padding: clamp(24px, 5vw, 52px);
+  text-align: left;
+  pointer-events: none;
+  background: linear-gradient(180deg, transparent 35%, rgba(5,6,8,.58) 100%);
+}
+.card-kicker, .card-hint {
+  font-size: 10px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,.48);
+}
+.card-copy p {
+  max-width: 560px;
+  margin: 12px 0 18px;
+  font-size: clamp(21px, 3vw, 38px);
+  line-height: 1.08;
+  letter-spacing: -.025em;
+  font-weight: 420;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spatial-card { transition: none; }
+}
+
+@media (max-width: 640px) {
+  .prototype { padding: 18px; }
+  .spatial-card { width: 94vw; border-radius: 16px; }
+  .prototype-note { display: none; }
+}
