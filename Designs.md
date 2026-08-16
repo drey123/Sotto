@@ -21,11 +21,17 @@ The product has two visual layers:
 1. **Environment** — 3D spatial surroundings and discovery objects.
 2. **Content UI** — the 2D reading and interaction interface.
 
-The environment must never make text difficult to read. Content takes priority whenever the user is reading.
+The environment is **not currently defined as black, dark, light, realistic, abstract, architectural, natural, or any other specific setting**. That choice must come from visual research and prototypes.
+
+The content UI has the stronger current visual direction: monochrome/metallic, refined and tactile. This does **not** mean the surrounding environment must use the same palette.
+
+The environment should provide spatial context and discovery while keeping content legible. Content takes priority whenever the user is reading.
 
 ## Color direction
 
-Primary palette:
+### Content UI / card direction
+
+Primary working palette:
 
 - near-black
 - black
@@ -36,7 +42,21 @@ Primary palette:
 
 Blue should feel like a metallic reflection or state transition rather than a permanently saturated UI color.
 
+These are directions for the card/content interface, **not a decision for the entire 3D environment**.
+
 Use semantic design tokens rather than scattered raw color values. This follows the useful principle in shadcn/ui's current styling guidance: semantic tokens make themes and states consistent. urlshadcn styling guidancehttps://github.com/shadcn-ui/ui/blob/main/skills/shadcn/rules/styling.md
+
+### Environment
+
+No final palette has been selected. Research should explore how different environments affect:
+
+- card visibility
+- spatial depth
+- atmosphere
+- perceived quality
+- navigation
+- reading transitions
+- visual fatigue
 
 ## Typography
 
@@ -151,13 +171,21 @@ Useful concept:
 
 We should study token architecture without adopting Material's visual appearance. urlMaterial Web design tokenshttps://github.com/material-components/material-web/blob/main/docs/intro.md
 
-## 3D source
+## 3D source and environment research
 
 `cortiz2894/stylized-components` is a source of reusable 3D/rendering primitives. We should inspect and adapt individual ideas/code where appropriate rather than treating the repository as our application framework.
 
 Relevant primitives already identified include procedural surface scattering, instancing, shader-based surfaces and event-driven water/ripple effects.
 
+The environment is a **composition of possible open-source primitives**, not a requirement to create a world from zero. Other repositories should be researched for complementary terrain, atmosphere, particles, simulation, procedural geometry, lighting, interaction and spatial-navigation techniques.
+
+The existence of a useful primitive does not determine the final environment. We should compare alternatives and prototype before committing to a visual setting.
+
 ## UX rules
+
+### Discovery
+
+The user should be able to understand where and what they can interact with without turning the environment into a conventional game HUD.
 
 ### Selection
 
@@ -201,6 +229,8 @@ Reject:
 - hover-only functionality
 - visual complexity that does not improve comprehension
 - importing a library simply because it is popular
+- choosing a black/void environment merely because it is easy
+- forcing the card palette onto the entire environment without evidence
 
 ## Design process
 
