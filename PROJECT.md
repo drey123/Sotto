@@ -12,6 +12,16 @@ People can leave secrets or confessions anonymously. Other people discover them,
 
 The unusual part is the presentation: instead of treating the product as a conventional vertical feed, Sotto explores a spatial 3D environment containing distinct content objects. The 3D environment is a presentation/discovery layer; the confession, reading, reaction and access loop remains the core product.
 
+## Spatial environment direction
+
+The environment is **not predefined as a black void, dark room, realistic landscape, or any other specific visual setting**.
+
+It should be treated as a real spatial environment that can provide depth, perspective, lighting, atmosphere, surfaces, movement and surroundings. The exact environment remains a research/design question.
+
+Open-source 3D/rendering systems are part of the exploration. `cortiz2894/stylized-components` already provides reusable environmental/rendering primitives such as procedural surface scattering, grass fields, water, sky and shader effects. Other open-source projects will be researched for complementary primitives.
+
+The goal is to assemble useful primitives rather than build an entire 3D world from scratch or adopt another project's application architecture wholesale.
+
 ## Current user loop
 
 1. Enter Sotto.
@@ -34,6 +44,7 @@ This loop is a hypothesis, not a claim that a particular psychological mechanism
 - Progressive disclosure should reduce visual weight without unnecessarily removing information.
 - The reading experience is more important than decorative 3D complexity.
 - The spatial environment should support discovery rather than become a conventional game unless later research proves otherwise.
+- The environment and content UI are separate visual concerns: the environment surrounds and presents content; it does not automatically inherit the card/UI palette.
 - Privacy is a core product property, not a marketing add-on.
 - Avoid collecting identity information that is not necessary for the product.
 - Aggregate behavioural analytics may be useful for improving discovery, but individual surveillance is not the objective.
@@ -52,7 +63,8 @@ If end-to-end encryption is used, the exact consequences for moderation, search,
 
 - Exact monetization mechanism.
 - Exact discovery/navigation interaction.
-- Exact 3D world geometry.
+- Exact 3D world geometry and visual setting.
+- Exact environment style: realistic, abstract, architectural, natural, dark, light, etc.
 - Whether every user must contribute before browsing or whether contribution unlocks deeper functionality.
 - Exact ranking algorithm.
 - Exact media limits.
