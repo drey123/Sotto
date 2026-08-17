@@ -19,11 +19,78 @@ The project demonstrates that a visually rich environment does not require every
 
 Its scattering implementation samples triangles by area and uses deterministic seeded randomness. This is useful both for repeatability and for keeping authoring requirements low.
 
-Its water implementation uses procedural shader functions rather than requiring animated texture sequences.
+Its water implementation uses procedural shader functions rather than requiring animated texture sequences. The project also demonstrates layered rendering: seabed, water, depth intersection, wave simulation, sparkles and ripple events can be composed from independent passes. citeturn0search0
 
 ### Sotto implication
 
 Treat these as independent primitives. Do not import the repository as an application framework and do not assume its visual style defines Sotto's world.
+
+## `Yousuf-developer/Viscose-carousel`
+
+### Confirmed useful primitives
+
+- Continuous ring-based spatial arrangement.
+- Card position/orientation derived from a shared ring state.
+- Hover-driven changes to nearby cards.
+- Custom plane shaders and texture-atlas techniques.
+- Motion/geometry relationships between objects.
+
+The repository separates the ring into modules for atlas data, parameters, projects, text, tags and shaders. Its main carousel implementation is a large custom interaction system rather than a generic UI component. citeturn67file0
+
+### Sotto implication
+
+Do not copy the carousel metaphor. Extract the more interesting primitive: **objects can react as a group when the user approaches one object**.
+
+Our current prototype applies this as local spatial repulsion: nearby whisper objects yield, rotate and separate when the pointer approaches them. This creates a physical relationship between objects instead of a conventional hover highlight.
+
+## `amilich/isometric-city`
+
+### Confirmed useful primitives
+
+- Native HTML5 Canvas rendering without an external game engine.
+- Isometric world representation.
+- Depth sorting and layer management.
+- Autonomous simulation systems.
+- Pathfinding/crowd-style movement.
+- Save/load state architecture.
+- Responsive touch controls.
+
+The project demonstrates that a rich spatial simulation can be built with a comparatively direct rendering layer instead of automatically requiring a full 3D engine. Its README explicitly describes Canvas rendering, depth sorting, dynamic traffic/pedestrian simulation and responsive controls. citeturn0search1
+
+### Sotto implication
+
+This challenges the assumption that every part of Sotto's eventual world must be Three.js geometry. Some future environmental layers may be cheaper as Canvas/2.5D or ordinary DOM/CSS.
+
+More importantly, the simulation idea is transferable: instead of cars navigating a city, **whisper objects can have their own slow spatial behaviour**—drifting, clustering, separating, becoming prominent or remaining peripheral.
+
+## Cross-pollination hypothesis
+
+The current prototype combines ideas rather than copying applications:
+
+`spatial card field` + `local object reaction` + `procedural environment` + `slow simulation`
+
+This is deliberately not yet a product definition. It is an experiment to discover whether the combination itself produces a compelling interaction.
+
+## Current prototype primitives
+
+The current Sotto visual lab implements:
+
+- three concentric moving whisper fields
+- physical rectangular whisper objects
+- local pointer-induced repulsion
+- object tilt and proximity response
+- orbit motion
+- atmospheric fog and a spatial floor
+- instanced ambient particles
+- metallic object materials
+- selection/focus transition
+- reading state
+- locked/reveal state
+- local voting
+- local anonymous whisper submission
+- responsive mouse/touch camera controls
+
+These are prototype mechanisms, not production architecture.
 
 ## Research candidates
 
@@ -38,6 +105,7 @@ The next research pass should inspect source code, not screenshots, for:
 - shader-based post-processing
 - game-jam interaction systems
 - unusual browser-native 3D interfaces
+- Canvas/2.5D rendering systems
 
 For every candidate record:
 
@@ -63,4 +131,4 @@ For every candidate record:
 
 ## Current conclusion
 
-We should build the first visual prototype before selecting a complete environment. The card/content object is the atomic visual unit; the world should be assembled around what that object actually needs.
+We should now build a **complete interaction laboratory**, not a final product. The purpose is to combine the strongest primitives we have found and discover what kind of experience naturally emerges. Only after the resulting experience is compelling should we decide exactly what users come to Sotto to do.
