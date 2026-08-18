@@ -1,24 +1,18 @@
 # Sotto API — High-Level Design
 
-This document describes how the Sotto API works and the small vocabulary it understands.
+Sotto is a tiny API built on top of [No-as-a-Service (NaaS)](https://github.com/hotheadhacker/no-as-a-service).
 
-Sotto is built on top of [No-as-a-Service (NaaS)](https://github.com/hotheadhacker/no-as-a-service).
-
-The goal is simple: **give Sotto what is happening, give it the rules, and get a No back.**
+The idea is simple: **give Sotto what is happening and how you want it handled, and get a No back.**
 
 ## 1. The API shape
 
-Sotto always works with four main pieces:
+Every request has three things:
 
 ```text
-id
- ↓
-type
- ↓
-context
- ↓
-Sotto
- ↓
+id + type + context
+        ↓
+      Sotto
+        ↓
 id + type + decision + response
 ```
 
@@ -53,9 +47,9 @@ id + type + decision + response
 
 ## 2. Context
 
-`context` is where the useful information lives.
+`context` is intentionally flexible and domain-agnostic.
 
-It is intentionally flexible. Sotto does not decide whether something is a pull request, payment, job, customer request, product, message, or anything else.
+Sotto does not decide what the context is about. It could be a pull request, payment, job, customer request, product, message, or anything else.
 
 For example:
 
@@ -79,7 +73,9 @@ Or:
 }
 ```
 
-The same API works for both.
+The field names and values can change completely from one use case to another.
+
+`rules` is simply the part of the context that tells Sotto what should happen.
 
 ---
 
@@ -87,11 +83,11 @@ The same API works for both.
 
 Rules live inside `context.rules`.
 
-Users do **not** need to know how to write these rules.
+Users do **not** need to know how to write them.
 
-The Sotto UI lets them describe what they want in normal language. Sotto translates that into the JSON format below.
+The Sotto UI lets someone describe what they want in normal language. Sotto turns that into the JSON format below.
 
-They can then edit the JSON themselves if they want to.
+They can edit the JSON if they want to, but they don't have to write it themselves.
 
 Example:
 
@@ -122,13 +118,15 @@ Can become:
 ]
 ```
 
-The JSON is the actual format Sotto evaluates. Natural language is only used to help create it.
+The JSON is what Sotto evaluates. Natural language is only used to help create it.
 
 ---
 
-## 4. Operators
+## 4. Sotto's small vocabulary
 
-Sotto starts with a small set of operators that can cover many different uses without creating a huge language.
+Sotto uses a fixed vocabulary so the JSON stays predictable while the context stays flexible.
+
+### Operators
 
 | Operator | Meaning |
 |---|---|
@@ -142,33 +140,31 @@ Sotto starts with a small set of operators that can cover many different uses wi
 | `contains` | contains a value |
 | `exists` | exists |
 
-Rules can be joined with:
+### Logic
 
 | Word | Meaning |
 |---|---|
-| `all` | every rule must match |
-| `any` | at least one rule must match |
-| `not` | reverse the result |
+| `all` | everything inside must match |
+| `any` | at least one must match |
+| `not` | reverses the result |
 
-These operators are fixed. The values and field names are flexible.
+The vocabulary is fixed. The fields and values are not.
+
+This means Sotto can work with very different kinds of information without creating a new API for every use case.
 
 ---
 
 ## 5. Decision
 
-A rule can return a decision.
-
-For the Sotto No flow, the normal decision is:
+Sotto is built around the No flow, so the normal decision is:
 
 ```json
 "decision": "no"
 ```
 
-The decision is separate from the response text.
+The decision is separate from the response.
 
-The response is the short message Sotto returns with the decision.
-
-Example:
+The response is the short message that goes with the No.
 
 ```json
 {
@@ -183,11 +179,11 @@ Example:
 
 Responses should stay short and fun, like NaaS.
 
-Sotto's generated responses should normally be **4–15 words**.
+Generated responses should normally be **4–15 words**.
 
-Users can edit the response if they do not like it.
+Users can edit the response if they don't like it.
 
-The response schema does not change:
+The response shape never changes:
 
 ```json
 "response": "Not this time, I'm already too busy."
@@ -197,45 +193,43 @@ The response schema does not change:
 
 ## 7. Translation
 
-The UI can use AI to translate a person's normal language into Sotto's JSON.
+The Sotto UI can use AI to turn normal language into Sotto JSON.
 
 For example:
 
 ```text
-"Only accept jobs over $200 from new customers."
+Only accept jobs over $200 from new customers.
 ```
 
-becomes structured JSON using Sotto's known vocabulary and operators.
+The AI translates the meaning into Sotto's known fields, operators, values, and rule structure.
 
-The AI does not get to invent the API format.
+It cannot invent new Sotto operators or change the API shape.
 
-Sotto validates the generated JSON against the fixed schema before using it.
+The generated JSON is validated before it can be used.
 
-If the JSON is invalid or contains an unsupported operator, it is rejected instead of being guessed at.
+If it is invalid or uses something Sotto does not support, Sotto rejects it rather than guessing.
 
-Users can fix the JSON themselves in the editor.
+Users can edit the JSON themselves when needed.
 
 ---
 
 ## 8. Deterministic evaluation
 
-Once Sotto has valid JSON, the actual check does not need an AI model.
+Once the JSON is valid, the final decision does not need an AI model.
 
-Sotto evaluates the same input using the same operators and rules.
+Sotto uses the same operators and the same rule structure every time.
 
 ```text
-context
-   +
-rules
-   ↓
-validate
-   ↓
-evaluate
-   ↓
-decision + response
+context + rules
+      ↓
+   validate
+      ↓
+   evaluate
+      ↓
+ decision + response
 ```
 
-The AI helps create the rules. It does not secretly change the decision each time the API is called.
+The AI helps translate what someone means. It does not decide the result on each API call.
 
 ---
 
@@ -309,9 +303,7 @@ Each request gets its own response.
 
 The API key is only for using Sotto, rate limits, and usage/payment tracking.
 
-It does not contain the rules.
-
-Sotto does not use the API key to find or load a saved rule set.
+It does not contain the rules and is not used to find them.
 
 A user can have up to **3 API keys at once**.
 
@@ -357,4 +349,4 @@ Sotto should stay:
 - Easy to understand
 - Fun enough to feel like NaaS
 
-The vocabulary should grow only when a real use case needs it. We should not turn Sotto into a large general-purpose rules platform.
+The vocabulary should stay small and only grow when a real use case needs something it cannot express.
