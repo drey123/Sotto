@@ -68,6 +68,14 @@ Many deterministic decisions
 
 Multiple requests can be sent together and checked against the same rules.
 
+## API keys
+
+Each user starts with one API key.
+
+A user can have up to **3 API keys at the same time**. They can create a new key and delete an old one when needed.
+
+The API key identifies the user, their rules, and their usage.
+
 ---
 
 **Built on [No-as-a-Service](https://github.com/hotheadhacker/no-as-a-service).**
