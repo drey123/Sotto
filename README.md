@@ -2,26 +2,28 @@
 
 > **Need to say no? Let Sotto handle it.**
 
-Sotto is a tiny API built on top of [No-as-a-Service (NaaS)](https://github.com/hotheadhacker/no-as-a-service).
+Sotto is a tiny API built on top of No-as-a-Service (NaaS).
 
 NaaS gives you a random No.
 
-Sotto lets you describe what you want in normal language, turns it into a small set of rules, and lets you use those rules through an API.
+Sotto lets you describe what you want, turns that into a small set of rules, and gives you a predictable response through an API.
 
 ## How it works
 
 ```text
-NaaS
- ↓
-Sotto
- ↓
-Tell Sotto what you want
- ↓
-Sotto turns it into JSON rules
- ↓
-Edit them if you want
- ↓
-Use them through the API
+You say what you want
+        ↓
+      text
+        ↓
+       LLM
+        ↓
+      rules
+        ↓
+   review / edit
+        ↓
+      Sotto
+        ↓
+ decision + response
 ```
 
 That's it.
@@ -30,56 +32,49 @@ That's it.
 
 Every request has an `id`, a `type`, and a `context`.
 
-The context can contain the original `text` and the rules Sotto understood from it.
+The context contains the original `text` and the `rules` Sotto understood from it.
 
 ```json
 {
   "id": "pr-123",
   "type": "pull_request",
   "context": {
-    "text": "Say no to pull requests before 9pm unless they're urgent.",
+    "text": "Approve only pull requests after 9pm.",
     "rules": [
       {
         "when": {
-          "all": [
-            {
-              "field": "time",
-              "operator": "lt",
-              "value": "21:00"
-            },
-            {
-              "field": "urgent",
-              "operator": "eq",
-              "value": false
-            }
-          ]
+          "field": "time",
+          "operator": "gte",
+          "value": "21:00"
         },
         "decision": "no",
-        "response": "I'm busy before 9pm."
+        "response": "Not before 9pm."
       }
     ]
   }
 }
 ```
 
-The `text` is what the person said. The `rules` are Sotto's structured understanding of it.
+`text` is what the person said.
 
-When the API is called, the caller supplies the information the rules need to evaluate. Sotto does not store it.
+`rules` are Sotto's structured understanding of what they said.
 
-A successful response is always predictable:
+The rules are what Sotto validates and evaluates. A user can review or edit them before using them.
+
+A successful response is predictable:
 
 ```json
 {
   "id": "pr-123",
   "type": "pull_request",
   "decision": "no",
-  "response": "I'm busy before 9pm."
+  "response": "Not before 9pm."
 }
 ```
 
-You can send one request or a whole bunch at once.
+You can send one request or a whole batch.
 
-## Make your own rules
+## Make your rules
 
 Don't feel like writing JSON?
 
@@ -87,11 +82,11 @@ Just tell Sotto what you want in normal language.
 
 For example:
 
-> Say no to pull requests before 9pm unless they're urgent.
+> Approve only pull requests after 9pm.
 
-Sotto turns that into rules you can review and edit.
+Sotto turns what you said into rules you can review and edit.
 
-You can also skip the UI and write the JSON yourself.
+You can also write or edit the JSON yourself.
 
 ## Your rules stay yours
 
@@ -99,7 +94,7 @@ Sotto doesn't store them.
 
 Send them whenever you use the API.
 
-Your API key is only for using Sotto and keeping track of your usage.
+Your API key is for authentication, rate limits, usage, and payment tracking. It is not where your rules live.
 
 ## Classic NaaS
 
@@ -113,4 +108,4 @@ Same old NaaS magic.
 
 ---
 
-Built on [No-as-a-Service](https://github.com/hotheadhacker/no-as-a-service).
+Built on No-as-a-Service (NaaS).
