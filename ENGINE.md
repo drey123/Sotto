@@ -2,23 +2,79 @@
 
 This document defines how Sotto validates and evaluates the JSON it receives.
 
-Sotto is built on top of NaaS. The context can be about anything, but the language Sotto uses for rules stays small and fixed.
+Sotto is built on top of NaaS. The context is flexible and can be about anything. Sotto's rule language stays small and fixed.
 
 ## 1. The flow
 
 ```text
-Context + rules
-      ↓
-   Validate
-      ↓
-   Evaluate
-      ↓
- decision + response
+text
+ ↓
+LLM
+ ↓
+rules
+ ↓
+user review / edit
+ ↓
+validation
+ ↓
+context + rules
+ ↓
+evaluation
+ ↓
+decision + response
 ```
 
-An LLM may help turn normal language into Sotto JSON. The engine does not trust that JSON automatically.
+The LLM helps translate what a person means. It does not make the final decision.
 
-## 2. What the engine validates
+## 2. The three important pieces
+
+### `text`
+
+The original natural-language instruction.
+
+Example:
+
+```json
+"text": "Say no to anyone under 18."
+```
+
+### `rules`
+
+Sotto's structured representation of what that text means.
+
+```json
+"rules": [
+  {
+    "when": {
+      "field": "age",
+      "operator": "lt",
+      "value": 18
+    },
+    "decision": "no",
+    "response": "You need to be 18 or older."
+  }
+]
+```
+
+### Other context data
+
+The information available when the rules are evaluated.
+
+```json
+"age": 17
+```
+
+The distinction is:
+
+```text
+text  = what the person said
+rules = Sotto's structured understanding of it
+data  = what the rule evaluates
+```
+
+Sotto does not require predefined domain fields.
+
+## 3. What the engine validates
 
 The engine checks:
 
@@ -28,12 +84,12 @@ The engine checks:
 - Every operator is supported.
 - Every logic word is supported.
 - Values can be used with the selected operator.
-- Fields used by a rule are available in the context.
+- Fields used by a rule can be evaluated against the supplied context.
 - A decision and response are valid.
 
 If validation fails, Sotto does not guess. It returns an error.
 
-## 3. Fixed vocabulary
+## 4. Fixed vocabulary
 
 ### Operators
 
@@ -59,82 +115,69 @@ not
 
 These words are controlled by Sotto. An LLM or user cannot create a new operator and expect the engine to understand it.
 
-## 4. Flexible context
+## 5. Flexible context
 
 Sotto does not have a fixed list of fields.
 
-This is valid:
+A caller can supply any JSON data needed by its rules.
+
+For example:
 
 ```json
 {
-  "context": {
-    "age": 31,
-    "price": 200,
-    "customer": "new",
-    "rules": []
-  }
-}
-```
-
-This is also valid:
-
-```json
-{
-  "context": {
-    "tests_passed": false,
-    "files_changed": 12,
-    "author": "john",
-    "rules": []
-  }
-}
-```
-
-Fields such as `age`, `price`, `time`, `urgent`, or `tests_passed` are **not Sotto fields**. They belong to the caller's context.
-
-The engine cares about the values and the rule used against them, not what a field is called.
-
-## 5. Context vs rule values
-
-The context contains the information about the thing being evaluated.
-
-```json
-"context": {
-  "age": 31,
-  "price": 150,
-  "country": "NG",
+  "text": "Say no if the tests are failing.",
+  "tests_passed": false,
   "rules": []
 }
 ```
 
-The rule contains the value that the context is compared against.
+Or:
+
+```json
+{
+  "text": "Say no to orders below $200.",
+  "order": {
+    "total": 150
+  },
+  "rules": []
+}
+```
+
+Fields such as `age`, `price`, `time`, `urgent`, and `tests_passed` are not Sotto fields. They belong to the caller's context.
+
+## 6. Context values vs rule values
+
+A context value is the actual information available for evaluation.
+
+A rule value is the value the rule compares against.
+
+For example:
+
+```json
+"age": 17
+```
+
+with:
 
 ```json
 {
   "field": "age",
-  "operator": "gte",
+  "operator": "lt",
   "value": 18
 }
 ```
 
-This means:
+means:
 
 ```text
-context.age >= 18
+17 < 18 → match
 ```
 
-So `age: 31` belongs in the context when it describes the current request. `18` belongs in the rule because it is the value the rule is testing against.
+The `17` is not part of the intent. It is the current data.
 
-The same field can be used with different rule values:
+The `18` is part of the rule because it came from the instruction "under 18."
 
-```text
-context.age >= 18
-context.age < 65
-context.age in [18, 21, 30]
-```
-
-Sotto does not decide what a field means. The caller supplies the context, and the rule describes how to evaluate it.
-
-## 6. Rule shape
+## 7. Rule shape
 
 A rule has:
 
@@ -152,33 +195,11 @@ A rule has:
 
 `response` is the short message returned with the decision.
 
-## 7. A simple rule
-
-```json
-{
-  "when": {
-    "field": "age",
-    "operator": "lt",
-    "value": 18
-  },
-  "decision": "no",
-  "response": "You need to be 18 or older."
-}
-```
-
-The engine reads this as:
-
-```text
-context.age < 18
-```
-
-If it matches, the rule returns its decision and response.
-
 ## 8. Value types
 
 Sotto uses normal JSON value types rather than creating a separate type system.
 
-Supported context values are:
+Supported JSON values are:
 
 ```text
 string
@@ -189,9 +210,7 @@ array
 object
 ```
 
-Operators decide which value types they can work with.
-
-For example:
+Operators decide which types they can work with.
 
 - `gt`, `gte`, `lt`, `lte` work with comparable values such as numbers.
 - `contains` works with strings and arrays.
@@ -199,9 +218,7 @@ For example:
 - `eq` and `neq` compare compatible values.
 - `exists` checks whether a field is present.
 
-Dates and times are represented as strings with defined formats rather than creating a separate date type.
-
-The exact comparison behavior will be defined by the operator rules below before implementation.
+Dates and times are represented as strings with defined formats.
 
 ## 9. Multiple rules
 
@@ -214,38 +231,15 @@ rule 1 → match → return it
 rule 2 → never reached
 ```
 
-This makes rule priority simple: put the more important rule first.
-
 There is no hidden priority system.
 
 ## 10. Missing fields
 
 If a rule references a field that is not present in the context, that rule does not match.
 
-For example:
-
-```json
-"context": {
-  "price": 100,
-  "rules": []
-}
-```
-
-and:
-
-```json
-{
-  "field": "age",
-  "operator": "gt",
-  "value": 18
-}
-```
-
-The rule does not match because `age` is not present.
+Sotto does not invent or guess missing values.
 
 Use `exists` when the presence of a field itself matters.
-
-Sotto does not invent or guess missing values.
 
 ## 11. Nested fields
 
@@ -260,37 +254,27 @@ order.total
 For example:
 
 ```json
-"context": {
-  "customer": {
-    "age": 31
-  },
-  "rules": []
+"customer": {
+  "age": 17
 }
 ```
 
-A rule can use:
+can be evaluated with:
 
 ```json
 {
   "field": "customer.age",
-  "operator": "gte",
+  "operator": "lt",
   "value": 18
 }
 ```
-
-The same missing-field behavior applies to nested paths.
 
 ## 12. Arrays
 
 Arrays are normal context values.
 
-For example:
-
 ```json
-"context": {
-  "tags": ["vip", "new"],
-  "rules": []
-}
+"tags": ["vip", "new"]
 ```
 
 `contains` can test whether an array contains a value:
@@ -313,64 +297,32 @@ For example:
 }
 ```
 
-Operators must keep these meanings consistent instead of changing behavior based on the caller's domain.
-
 ## 13. Logic
 
-### all
+### `all`
 
 Every item must match.
 
-```json
-{
-  "all": [
-    { "field": "urgent", "operator": "eq", "value": false },
-    { "field": "price", "operator": "lt", "value": 200 }
-  ]
-}
-```
-
-### any
+### `any`
 
 At least one item must match.
 
-```json
-{
-  "any": [
-    { "field": "urgent", "operator": "eq", "value": true },
-    { "field": "price", "operator": "gte", "value": 200 }
-  ]
-}
-```
+### `not`
 
-### not
+Reverses the result of another expression.
 
-The result is reversed.
-
-`not` can contain another rule expression, including an `all`, `any`, or another `not` expression.
-
-```json
-{
-  "not": {
-    "field": "urgent",
-    "operator": "eq",
-    "value": true
-  }
-}
-```
+`not` can contain another expression, including `all`, `any`, or another `not`.
 
 ## 14. Operator meaning
-
-Operators have one meaning and must behave the same every time.
 
 | Operator | Meaning |
 |---|---|
 | `eq` | equal |
 | `neq` | not equal |
 | `gt` | greater than |
-| `gte` | greater than or equal |
+| `gte` | greater than or equal to |
 | `lt` | less than |
-| `lte` | less than or equal |
+| `lte` | less than or equal to |
 | `in` | value is in a supplied list |
 | `contains` | a value contains an item |
 | `exists` | a field exists in the context |
@@ -379,7 +331,7 @@ An operator with an incompatible value type is invalid. The engine rejects it in
 
 ## 15. Validation boundary
 
-There are two different checks:
+There are two checks:
 
 ### Shape validation
 
@@ -387,31 +339,19 @@ Is this valid Sotto JSON?
 
 ### Meaning validation
 
-Can Sotto actually evaluate what this JSON is asking?
+Can Sotto actually evaluate what this JSON is asking against the supplied context?
 
 Both must pass before evaluation begins.
 
-For example, this is valid JSON:
-
-```json
-{
-  "field": "price",
-  "operator": "gt",
-  "value": "banana"
-}
-```
-
-But if the supplied context has a numeric `price`, the value type does not make sense for `gt`.
-
-The engine rejects it instead of guessing.
+The engine validates the structured rules, not the original English text. The text is preserved for the user and for traceability; the rules are the machine-readable representation Sotto evaluates.
 
 ## 16. No hidden decisions
 
 The engine does not invent missing information.
 
-It does not silently change an operator, convert an unknown field, or guess what the user meant.
+It does not silently change an operator, invent a field value, or guess what the user meant.
 
-If the request cannot be evaluated safely using Sotto's fixed language, it fails validation.
+If the rules cannot be evaluated safely using Sotto's fixed language, validation fails.
 
 ## 17. Multiple matches and `none`
 
@@ -419,7 +359,7 @@ The first matching rule wins.
 
 If no rule matches, that is different from a rule deciding `no`.
 
-Sotto returns a distinct `none` result:
+Sotto returns:
 
 ```json
 {
@@ -456,8 +396,6 @@ message
 path
 ```
 
-This lets software handle errors without parsing human text.
-
 ## 19. Response
 
 When a rule matches, Sotto returns:
@@ -474,6 +412,8 @@ When a rule matches, Sotto returns:
 The response is not used to decide whether a rule matches.
 
 It is the message returned after the decision is made.
+
+Generated responses should normally be **4–15 words**. Users can edit the response without changing the response schema.
 
 ## 20. Implementation rule
 
