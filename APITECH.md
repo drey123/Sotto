@@ -85,7 +85,7 @@ Rules live inside `context.rules`.
 
 Users do **not** need to know how to write them.
 
-The Sotto UI lets someone describe what they want in normal language. Sotto turns that into the JSON format below.
+The Sotto UI lets someone describe what they want in normal language. An LLM turns that into the JSON format below.
 
 They can edit the JSON if they want to, but they don't have to write it themselves.
 
@@ -118,7 +118,7 @@ Can become:
 ]
 ```
 
-The JSON is what Sotto evaluates. Natural language is only used to help create it.
+The JSON is what Sotto evaluates. The LLM only helps turn what someone means into Sotto JSON.
 
 ---
 
@@ -193,7 +193,7 @@ The response shape never changes:
 
 ## 7. Translation
 
-The Sotto UI can use AI to turn normal language into Sotto JSON.
+The Sotto UI can use an LLM to turn normal language into Sotto JSON.
 
 For example:
 
@@ -201,7 +201,7 @@ For example:
 Only accept jobs over $200 from new customers.
 ```
 
-The AI translates the meaning into Sotto's known fields, operators, values, and rule structure.
+The LLM translates the meaning into Sotto's known fields, operators, values, and rule structure.
 
 It cannot invent new Sotto operators or change the API shape.
 
@@ -215,7 +215,7 @@ Users can edit the JSON themselves when needed.
 
 ## 8. Deterministic evaluation
 
-Once the JSON is valid, the final decision does not need an AI model.
+Once the JSON is valid, the final decision does not need an LLM.
 
 Sotto uses the same operators and the same rule structure every time.
 
@@ -229,7 +229,7 @@ context + rules
  decision + response
 ```
 
-The AI helps translate what someone means. It does not decide the result on each API call.
+The LLM helps translate what someone means. Sotto evaluates the result.
 
 ---
 
