@@ -36,37 +36,91 @@ Sotto lets you describe what you want in simple words. It turns that into rules 
 
 ## API
 
-The UI is mainly for creating, editing, and testing rules. Once the rules are ready, the API can be used directly by software without using the UI.
-
-### Single request
+Base URL:
 
 ```text
-Your software
-     ↓
- Sotto API
-     ↓
- Your rules
-     ↓
-Deterministic decision
+https://api.sotto.no/v1
 ```
 
-One request goes in and one decision comes back.
+### Check one request
 
-### Bulk request
-
-```text
-Your software
-     ↓
- Sotto API
-     ↓
- Many requests
-     ↓
- Your rules
-     ↓
-Many deterministic decisions
+```http
+POST /check
 ```
 
-Multiple requests can be sent together and checked against the same rules.
+```json
+{
+  "input": {
+    "type": "meeting",
+    "time": "19:00",
+    "urgency": "normal"
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "decision": "no",
+  "reason": "I'm off after five.",
+  "rule": "after-hours"
+}
+```
+
+### Check many requests
+
+```http
+POST /check/batch
+```
+
+```json
+{
+  "inputs": [
+    {
+      "id": "1",
+      "type": "meeting",
+      "time": "19:00"
+    },
+    {
+      "id": "2",
+      "type": "meeting",
+      "time": "14:00"
+    }
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "results": [
+    {
+      "id": "1",
+      "decision": "no",
+      "reason": "I'm off after five.",
+      "rule": "after-hours"
+    },
+    {
+      "id": "2",
+      "decision": "yes"
+    }
+  ]
+}
+```
+
+The same locked rules are used for every request.
+
+### Classic NaaS
+
+Sotto also keeps the original NaaS-style endpoint:
+
+```http
+GET /no
+```
+
+It returns a random, fun response like the original NaaS.
 
 ## API keys
 
