@@ -23,16 +23,28 @@ id + type + decision + response
   "id": "pr-123",
   "type": "pull_request",
   "context": {
-    "text": "Approve only pull requests after 9pm.",
+    "text": "Reject before 9pm unless urgent, and always reject blocked users.",
     "rules": [
       {
+        "id": "rule_1",
         "when": {
-          "field": "time",
-          "operator": "gte",
-          "value": "21:00"
+          "all": [
+            { "field": "time", "operator": "lt", "value": "21:00" },
+            { "field": "urgent", "operator": "eq", "value": false }
+          ]
         },
         "decision": "no",
-        "response": "Not before 9pm."
+        "response": "Not before 9pm unless it's urgent."
+      },
+      {
+        "id": "rule_2",
+        "when": {
+          "field": "blocked",
+          "operator": "eq",
+          "value": true
+        },
+        "decision": "no",
+        "response": "Blocked users aren't accepted."
       }
     ]
   }
@@ -43,6 +55,8 @@ id + type + decision + response
 
 `rules` are Sotto's structured understanding of that instruction.
 
+A single `text` can produce multiple rules. Each rule gets its own stable `id` so software using Sotto can identify a result without depending on array position.
+
 These are the two things Sotto needs from the user's meaning. Sotto does not require a second user-defined data model beside them.
 
 ### Output
@@ -52,11 +66,14 @@ These are the two things Sotto needs from the user's meaning. Sotto does not req
   "id": "pr-123",
   "type": "pull_request",
   "decision": "no",
-  "response": "Not before 9pm."
+  "response": "Not before 9pm unless it's urgent.",
+  "rule_id": "rule_1"
 }
 ```
 
-`id` and `type` are returned so the caller can match the result to its own request. Sotto does not store the `id`.
+`id` and `type` are returned so the caller can match the result to its own request. `rule_id` identifies which rule produced the result. Sotto does not store any of these identifiers.
+
+The caller decides what to do with the result. Sotto does not provide or run the caller's automation.
 
 ---
 
@@ -74,7 +91,7 @@ context
 
 `rules` are what Sotto understood that text to mean in its fixed rule language.
 
-Sotto does not expose separate concepts such as `intent`, `facts`, or a predefined domain schema. Those distinctions are handled internally where needed.
+Sotto does not expose separate concepts such as `intent`, `facts`, or a predefined domain schema.
 
 ---
 
@@ -86,7 +103,13 @@ Users do not need to write them by hand.
 
 The Sotto UI lets someone describe what they want in normal language. An LLM translates that text into Sotto's fixed JSON rule language.
 
-The user can review and edit the generated JSON before using it.
+A single text can contain several pieces of intent and therefore produce several rules.
+
+The user can review and edit the generated JSON before using it. They can also write or edit the JSON themselves.
+
+Each rule has an explicit `id`.
+
+Use `rule_id` in the response to identify the matching rule. Do not use `context.rules.1` or array position as a permanent identifier because editing or reordering rules can change positions.
 
 The LLM does not create new operators or change the API shape.
 
@@ -94,7 +117,75 @@ The engine validates the rules before evaluation.
 
 ---
 
-## 4. Sotto's small vocabulary
+## 4. Naming
+
+Sotto uses **snake_case** for multi-word JSON keys:
+
+```text
+rule_id
+pull_request
+api_key
+```
+
+It does not use camelCase such as:
+
+```text
+ruleId
+apiKey
+```
+
+The API's naming convention is fixed and should be followed consistently.
+
+---
+
+## 5. Helping users create the JSON
+
+Users should not have to understand the entire schema before they can use Sotto.
+
+The UI should guide them through:
+
+```text
+natural language
+      ↓
+     LLM
+      ↓
+valid Sotto JSON
+      ↓
+user reviews / edits
+      ↓
+     API
+```
+
+The UI can show the important pieces clearly:
+
+```text
+id
+ type
+ context.text
+ context.rules
+ context.rules[].id
+```
+
+For rules, the editor can expose the fixed vocabulary instead of asking users to remember it:
+
+```text
+field
+operator
+value
+all
+any
+not
+decision
+response
+```
+
+Advanced users can edit the JSON directly.
+
+The user does not need to know that a rule is internally represented as `rules[0]`, `rules[1]`, etc. The stable rule identifier is what should be used when referring to a rule outside the JSON.
+
+---
+
+## 6. Sotto's small vocabulary
 
 Sotto uses a fixed vocabulary so the JSON stays predictable while the meaning of `text` can be flexible.
 
@@ -124,7 +215,7 @@ The vocabulary is fixed. The LLM works within it.
 
 ---
 
-## 5. Decision
+## 7. Decision
 
 Sotto's normal decision is:
 
@@ -146,7 +237,7 @@ The decision is separate from the response.
 
 ---
 
-## 6. Response
+## 8. Response
 
 Responses are short and fun, in the spirit of NaaS.
 
@@ -160,7 +251,7 @@ Users can edit the response without changing the response schema.
 
 ---
 
-## 7. Translation
+## 9. Translation
 
 The Sotto UI can use an LLM to translate normal language into Sotto JSON.
 
@@ -174,6 +265,7 @@ The LLM can represent that intent as:
 
 ```json
 {
+  "id": "rule_1",
   "when": {
     "field": "age",
     "operator": "lt",
@@ -194,7 +286,7 @@ Users can edit the rules themselves when needed.
 
 ---
 
-## 8. Deterministic evaluation
+## 10. Deterministic evaluation
 
 Once the rules are valid, the final result does not need an LLM.
 
@@ -205,14 +297,16 @@ text + rules
      ↓
   evaluate
      ↓
-decision + response
+decision + response + rule_id
 ```
 
 The LLM helps translate what someone means. Sotto validates and evaluates the resulting rules.
 
+The caller decides what to automate from the result.
+
 ---
 
-## 9. Single request
+## 11. Single request
 
 ```http
 POST /v1/check
@@ -225,16 +319,18 @@ The caller sends an `id`, `type`, and `context`.
   "id": "pr-123",
   "type": "pull_request",
   "context": {
-    "text": "Approve only pull requests after 9pm.",
+    "text": "Reject before 9pm unless urgent.",
     "rules": [
       {
+        "id": "rule_1",
         "when": {
-          "field": "time",
-          "operator": "gte",
-          "value": "21:00"
+          "all": [
+            { "field": "time", "operator": "lt", "value": "21:00" },
+            { "field": "urgent", "operator": "eq", "value": false }
+          ]
         },
         "decision": "no",
-        "response": "Not before 9pm."
+        "response": "Not before 9pm unless it's urgent."
       }
     ]
   }
@@ -248,13 +344,14 @@ Response:
   "id": "pr-123",
   "type": "pull_request",
   "decision": "no",
-  "response": "Not before 9pm."
+  "response": "Not before 9pm unless it's urgent.",
+  "rule_id": "rule_1"
 }
 ```
 
 ---
 
-## 10. Batch requests
+## 12. Batch requests
 
 ```http
 POST /v1/check/batch
@@ -262,34 +359,20 @@ POST /v1/check/batch
 
 A batch contains multiple independent requests. Each item has its own `id`, `type`, and `context`.
 
-```json
-{
-  "requests": [
-    {
-      "id": "pr-123",
-      "type": "pull_request",
-      "context": {
-        "text": "Say no before 9pm.",
-        "rules": []
-      }
-    },
-    {
-      "id": "pr-124",
-      "type": "pull_request",
-      "context": {
-        "text": "Say no to urgent requests.",
-        "rules": []
-      }
-    }
-  ]
-}
+A request can also contain multiple rules. These are separate concepts:
+
+```text
+batch
+ ├── request 1 → text + rules[]
+ ├── request 2 → text + rules[]
+ └── request 3 → text + rules[]
 ```
 
-Each item gets its own result.
+Each item gets its own result. A result identifies its matched rule with `rule_id`.
 
 ---
 
-## 11. API keys
+## 13. API keys
 
 The API key is only for authentication, rate limits, usage, and payment tracking.
 
@@ -299,7 +382,7 @@ A user can have up to **3 API keys at once**.
 
 ---
 
-## 12. No database for rules
+## 14. No database for rules
 
 Sotto does not need to store a user's rules to run the API.
 
@@ -313,7 +396,7 @@ Sotto does not need cron jobs, webhooks, queues, or schedules.
 
 ---
 
-## 13. Classic NaaS
+## 15. Classic NaaS
 
 Sotto keeps the original NaaS-style endpoint:
 
@@ -327,7 +410,7 @@ Rule-based Sotto is the useful layer built on top.
 
 ---
 
-## 14. Design principles
+## 16. Design principles
 
 Sotto should stay:
 
