@@ -85,7 +85,7 @@ We do not expose separate concepts such as `intent`, `facts`, or a domain-specif
 
 Every rule has an explicit `id`.
 
-The rule ID is stable for that version of the rules and is returned when that rule produces the result.
+The rule ID is the caller's stable identifier for that rule's meaning and is returned when that rule produces the result.
 
 For example:
 
@@ -104,9 +104,13 @@ The result can identify it with:
 "rule_id": "rule_1"
 ```
 
-Do not use `context.rules.1` or array position as a permanent rule identifier. Reordering or editing rules can change positions.
+Do not use `context.rules.1` or array position as a permanent rule identifier. Reordering rules does not change their IDs.
 
-The caller can version or replace its own rule set however it wants. Sotto does not store rule versions.
+If the **meaning of a rule changes**, the caller should treat it as a new rule and give it a new ID. This prevents existing automation connected to the old ID from silently changing meaning.
+
+Changing only presentation, such as the response wording, does not require a new ID unless the caller wants to treat it as a new rule.
+
+Sotto does not store rule versions or maintain a ruleset history. If a caller needs versioning, it owns that versioning outside Sotto and sends the desired rules with each request.
 
 ## 4. Naming
 
