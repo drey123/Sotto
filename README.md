@@ -4,7 +4,7 @@
 
 Sotto is a simple API built on top of [No-as-a-Service (NaaS)](https://github.com/hotheadhacker/no-as-a-service).
 
-Sotto keeps the simple idea of NaaS and adds a way to create rules that your software can use again and again.
+Sotto keeps the simple idea of NaaS and adds a way to create rules that software can use again and again.
 
 ## How it works
 
@@ -32,7 +32,11 @@ Deterministic decisions come back
 
 ## What Sotto does
 
-Sotto lets you describe what you want in simple words. It turns that into rules you can edit and test. Once you are happy with the rules, Sotto gives you an API that your software can use to get the same decision every time.
+Sotto helps turn what you want into rules you can edit and test. Once the rules are ready, Sotto gives you an API that your software can use to get the same decision every time.
+
+The caller provides the context. Sotto evaluates that context against the locked rules and returns a fixed response format.
+
+Sotto does not decide what the caller should do next. The caller's software can use the response however it wants.
 
 ## API
 
@@ -48,25 +52,41 @@ https://api.sotto.no/v1
 POST /check
 ```
 
+Request:
+
 ```json
 {
-  "input": {
-    "type": "meeting",
-    "time": "19:00",
-    "urgency": "normal"
+  "id": "pr-123",
+  "type": "pull_request",
+  "context": {
+    "author": "john",
+    "files_changed": 12,
+    "tests_passed": false
   }
 }
 ```
+
+The `context` can contain whatever information the caller needs. Sotto does not require a specific domain such as GitHub, payments, hiring, or meetings.
 
 Response:
 
 ```json
 {
+  "id": "pr-123",
+  "type": "pull_request",
   "decision": "no",
-  "reason": "I'm off after five.",
-  "rule": "after-hours"
+  "response": "Tests aren't passing yet."
 }
 ```
+
+The response always uses the same four fields:
+
+- `id` — the caller's ID, returned unchanged
+- `type` — the caller's request type
+- `decision` — the deterministic result
+- `response` — the short response created or edited by the user
+
+Sotto does not store or create the caller's `id`. It returns it so the caller can match the response to the original request.
 
 ### Check many requests
 
@@ -74,18 +94,24 @@ Response:
 POST /check/batch
 ```
 
+Request:
+
 ```json
 {
-  "inputs": [
+  "requests": [
     {
-      "id": "1",
-      "type": "meeting",
-      "time": "19:00"
+      "id": "pr-123",
+      "type": "pull_request",
+      "context": {
+        "tests_passed": false
+      }
     },
     {
-      "id": "2",
-      "type": "meeting",
-      "time": "14:00"
+      "id": "pr-124",
+      "type": "pull_request",
+      "context": {
+        "tests_passed": true
+      }
     }
   ]
 }
@@ -97,30 +123,22 @@ Response:
 {
   "results": [
     {
-      "id": "1",
+      "id": "pr-123",
+      "type": "pull_request",
       "decision": "no",
-      "reason": "I'm off after five.",
-      "rule": "after-hours"
+      "response": "Tests aren't passing yet."
     },
     {
-      "id": "2",
-      "decision": "yes"
+      "id": "pr-124",
+      "type": "pull_request",
+      "decision": "yes",
+      "response": "Looks good to me."
     }
   ]
 }
 ```
 
-The same locked rules are used for every request.
-
-### Classic NaaS
-
-Sotto also keeps the original NaaS-style endpoint:
-
-```http
-GET /no
-```
-
-It returns a random, fun response like the original NaaS.
+The same locked rules are used for every request in the batch.
 
 ## API keys
 
@@ -129,6 +147,16 @@ Each user starts with one API key.
 A user can have up to **3 API keys at the same time**. They can create a new key and delete an old one when needed.
 
 The API key identifies the user, their rules, and their usage.
+
+## Classic NaaS
+
+Sotto also keeps the original NaaS-style endpoint:
+
+```http
+GET /no
+```
+
+It returns a random, fun response like the original NaaS.
 
 ---
 
