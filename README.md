@@ -4,7 +4,7 @@
 
 Sotto is a simple API built on top of [No-as-a-Service (NaaS)](https://github.com/hotheadhacker/no-as-a-service).
 
-Sotto keeps the simple idea of NaaS and adds a way to create rules that software can use again and again.
+Sotto keeps the simple idea of NaaS and adds a way for software to use the caller's own context and rules to return a consistent **No**.
 
 ## How it works
 
@@ -15,11 +15,11 @@ Sotto UI
  ↓
 User describes what they want
  ↓
-Sotto proposes rules
+Sotto turns it into JSON rules
  ↓
-User edits rules
+User edits the rules
  ↓
-User tests rules
+User tests the rules
  ↓
 User locks/version them
  ↓
@@ -27,16 +27,16 @@ Sotto gives them an API
  ↓
 Their software sends individual or bulk requests
  ↓
-Deterministic decisions come back
+Sotto returns a deterministic No
 ```
 
 ## What Sotto does
 
-Sotto helps turn what you want into rules you can edit and test. Once the rules are ready, Sotto gives you an API that your software can use to get the same decision every time.
+Sotto helps turn what you mean into rules that can be edited, tested, and used again.
 
-The caller provides the context. Sotto evaluates that context against the locked rules and returns a fixed response format.
+When the API is used, the caller sends an `id`, `type`, and flexible `context`. Sotto checks that context against the caller's locked rules and returns the same fixed response shape every time.
 
-Sotto does not decide what the caller should do next. The caller's software can use the response however it wants.
+Sotto does not control what the caller's software does with the response. The caller can use it however they want.
 
 ## API
 
@@ -66,7 +66,7 @@ Request:
 }
 ```
 
-The `context` can contain whatever information the caller needs. Sotto does not require a specific domain such as GitHub, payments, hiring, or meetings.
+The `context` is flexible. Sotto does not require a specific domain. It can contain whatever information the caller needs to evaluate.
 
 Response:
 
@@ -83,10 +83,10 @@ The response always uses the same four fields:
 
 - `id` — the caller's ID, returned unchanged
 - `type` — the caller's request type
-- `decision` — the deterministic result
-- `response` — the short response created or edited by the user
+- `decision` — Sotto's deterministic decision
+- `response` — the short response from the locked rule
 
-Sotto does not store or create the caller's `id`. It returns it so the caller can match the response to the original request.
+Sotto does not create or store the caller's `id`. It returns it so the caller can match the response to the original request.
 
 ### Check many requests
 
@@ -131,8 +131,8 @@ Response:
     {
       "id": "pr-124",
       "type": "pull_request",
-      "decision": "yes",
-      "response": "Looks good to me."
+      "decision": "no",
+      "response": "I'm still saying no."
     }
   ]
 }
@@ -140,13 +140,43 @@ Response:
 
 The same locked rules are used for every request in the batch.
 
+## Rules
+
+Sotto uses one fixed rule format. The caller's context can be different for every use case, but the rule structure stays the same.
+
+The first version uses a small set of deterministic operators:
+
+```text
+eq        equal
+neq       not equal
+gt        greater than
+gte       greater than or equal
+lt        less than
+lte       less than or equal
+in        is one of
+contains  contains
+exists    exists
+```
+
+Rules can combine conditions with:
+
+```text
+all
+any
+not
+```
+
+Sotto's AI helps translate natural language into this JSON. It does not change the rule format or make the final decision. The generated JSON is validated before it can be used.
+
+Users can edit the generated JSON themselves, test it, and lock a version when they are happy with it.
+
 ## API keys
 
 Each user starts with one API key.
 
 A user can have up to **3 API keys at the same time**. They can create a new key and delete an old one when needed.
 
-The API key identifies the user, their rules, and their usage.
+The API key identifies the user and their Sotto rules.
 
 ## Classic NaaS
 
