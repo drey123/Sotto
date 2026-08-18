@@ -7,7 +7,7 @@ Sotto is built on top of NaaS. The user-facing model stays deliberately small:
 ```text
 context
  ├── text
- └── rules
+ └── rules[]
 ```
 
 ## 1. The flow
@@ -25,7 +25,7 @@ User text
    ↓
  Sotto
    ↓
- decision + response
+ decision + response + rule_id
 ```
 
 The LLM helps translate what a person means into Sotto's fixed rule language. It does not define that language and it does not get to invent new operators.
@@ -37,23 +37,37 @@ The LLM helps translate what a person means into Sotto's fixed rule language. It
 The original natural-language instruction.
 
 ```json
-"text": "Say no to anyone under 18."
+"text": "Reject before 9pm unless urgent, and always reject blocked users."
 ```
 
-### `rules`
+### `rules[]`
 
 Sotto's structured representation of what the text means.
+
+One text can contain multiple pieces of intent, so one text can produce multiple rules.
 
 ```json
 "rules": [
   {
+    "id": "rule_1",
     "when": {
-      "field": "age",
-      "operator": "lt",
-      "value": 18
+      "all": [
+        { "field": "time", "operator": "lt", "value": "21:00" },
+        { "field": "urgent", "operator": "eq", "value": false }
+      ]
     },
     "decision": "no",
-    "response": "You need to be 18 or older."
+    "response": "Not before 9pm unless it's urgent."
+  },
+  {
+    "id": "rule_2",
+    "when": {
+      "field": "blocked",
+      "operator": "eq",
+      "value": true
+    },
+    "decision": "no",
+    "response": "Blocked users aren't accepted."
   }
 ]
 ```
@@ -67,13 +81,100 @@ rules = what Sotto understood it to mean
 
 We do not expose separate concepts such as `intent`, `facts`, or a domain-specific context schema.
 
-## 3. What the engine validates
+## 3. Rule identity
+
+Every rule has an explicit `id`.
+
+The rule ID is stable for that version of the rules and is returned when that rule produces the result.
+
+For example:
+
+```json
+{
+  "id": "rule_1",
+  "when": { "field": "age", "operator": "lt", "value": 18 },
+  "decision": "no",
+  "response": "You need to be 18 or older."
+}
+```
+
+The result can identify it with:
+
+```json
+"rule_id": "rule_1"
+```
+
+Do not use `context.rules.1` or array position as a permanent rule identifier. Reordering or editing rules can change positions.
+
+The caller can version or replace its own rule set however it wants. Sotto does not store rule versions.
+
+## 4. Naming
+
+Sotto uses **snake_case** for multi-word JSON keys:
+
+```text
+rule_id
+pull_request
+api_key
+```
+
+It does not use camelCase such as `ruleId` or `apiKey`.
+
+This convention is fixed across the API.
+
+## 5. Helping users create JSON
+
+Users should not have to remember the entire schema.
+
+The UI should guide them through:
+
+```text
+natural language
+      ↓
+     LLM
+      ↓
+valid Sotto JSON
+      ↓
+user reviews / edits
+      ↓
+     API
+```
+
+The important pieces can be shown as:
+
+```text
+id
+type
+context.text
+context.rules[]
+context.rules[].id
+```
+
+For rules, the editor can expose the fixed vocabulary instead of asking users to remember it:
+
+```text
+field
+operator
+value
+all
+any
+not
+decision
+response
+```
+
+Advanced users can edit the JSON directly.
+
+The UI should generate unique rule IDs automatically. Users should not need to invent IDs unless they want to edit the raw JSON themselves.
+
+## 6. What the engine validates
 
 The engine checks:
 
 - The request has `id`, `type`, and `context`.
 - `context.text` is present and valid.
 - `context.rules` is valid.
+- Every rule has a valid `id`.
 - Every rule has the correct shape.
 - Every operator is supported.
 - Every logic word is supported.
@@ -83,7 +184,7 @@ The engine checks:
 
 If validation fails, Sotto does not guess. It returns an error.
 
-## 4. Fixed vocabulary
+## 7. Fixed vocabulary
 
 ### Operators
 
@@ -111,7 +212,7 @@ These words belong to Sotto.
 
 The LLM can use them, and a user can edit them, but neither can invent another operator and expect Sotto to understand it.
 
-## 5. Fields and values
+## 8. Fields and values
 
 Fields are not a predefined Sotto dictionary.
 
@@ -137,12 +238,13 @@ can become:
 
 Likewise, `price`, `time`, `country`, `urgent`, `pull_request`, or anything else can appear when the text requires it.
 
-## 6. Rule shape
+## 9. Rule shape
 
 A rule has:
 
 ```json
 {
+  "id": "rule_1",
   "when": {},
   "decision": "no",
   "response": "Not this time."
@@ -155,7 +257,7 @@ A rule has:
 
 `response` is the short message associated with that result.
 
-## 7. Value types
+## 10. Value types
 
 Sotto uses normal JSON value types:
 
@@ -182,33 +284,15 @@ Dates and times remain JSON strings with defined formats.
 
 The exact semantics of each operator are fixed by Sotto, not by the LLM.
 
-## 8. Logic
+## 11. Logic
 
 ### `all`
 
 Everything inside must apply.
 
-```json
-{
-  "all": [
-    { "field": "time", "operator": "gte", "value": "21:00" },
-    { "field": "urgent", "operator": "eq", "value": false }
-  ]
-}
-```
-
 ### `any`
 
 At least one item must apply.
-
-```json
-{
-  "any": [
-    { "field": "urgent", "operator": "eq", "value": true },
-    { "field": "priority", "operator": "eq", "value": "high" }
-  ]
-}
-```
 
 ### `not`
 
@@ -216,17 +300,19 @@ Reverses another expression.
 
 `not` can contain another expression, including `all`, `any`, or another `not`.
 
-## 9. Multiple rules
+## 12. Multiple rules
 
-Rules are ordered.
+Rules are ordered, but their IDs are the durable identifiers.
 
 **The first applicable rule wins.**
 
 There is no hidden priority system.
 
-If two rules express different outcomes for the same situation, their order determines which rule is considered first.
+If two rules could apply, the first one in the array produces the result.
 
-## 10. `no` and `none`
+The caller decides what to automate from the returned result. Sotto does not execute automation.
+
+## 13. `no` and `none`
 
 Sotto has two important results:
 
@@ -243,7 +329,7 @@ and:
 
 > “Sotto did not find an applicable rule.”
 
-## 11. Validation boundary
+## 14. Validation boundary
 
 There are two validation stages.
 
@@ -259,7 +345,7 @@ Both must pass before Sotto accepts the rules.
 
 The engine validates the structured rules. It does not attempt to reinterpret the original English text after the LLM has produced the rules.
 
-## 12. No hidden translation
+## 15. No hidden translation
 
 The engine does not silently rewrite a user's rules.
 
@@ -273,7 +359,7 @@ It does not:
 
 If the rules cannot be understood using Sotto's fixed language, validation fails.
 
-## 13. Error format
+## 16. Error format
 
 Validation errors use a predictable structure:
 
@@ -295,7 +381,7 @@ message
 path
 ```
 
-## 14. Response
+## 17. Response
 
 A rule carries its response with it:
 
@@ -306,13 +392,15 @@ A rule carries its response with it:
 }
 ```
 
+When it matches, Sotto returns the request `id`, request `type`, the rule's `rule_id`, its `decision`, and its `response`.
+
 The response is not another rule language.
 
 Generated responses should normally be **4–15 words**.
 
 Users can edit the response while keeping the same response schema.
 
-## 15. The engine stays small
+## 18. The engine stays small
 
 Sotto owns:
 
@@ -321,7 +409,8 @@ Sotto owns:
 - the operators;
 - validation;
 - rule evaluation;
-- the `no` / `none` result model.
+- the `no` / `none` result model;
+- rule identity in the response.
 
 Sotto does not own a dictionary of industries, applications, fields, or domains.
 
