@@ -6,7 +6,7 @@ Sotto is a tiny API built on top of [No-as-a-Service (NaaS)](https://github.com/
 
 NaaS gives you a random No.
 
-Sotto lets you make your own rules, then use them through an API.
+Sotto lets you describe what you want in normal language, turns it into a small set of rules, and lets you use those rules through an API.
 
 ## How it works
 
@@ -17,30 +17,27 @@ Sotto
  ↓
 Tell Sotto what you want
  ↓
-Sotto turns it into JSON
+Sotto turns it into JSON rules
  ↓
-Edit it if you want
+Edit them if you want
  ↓
-Test it
- ↓
-Use it through the API
+Use them through the API
 ```
 
 That's it.
 
 ## The API
 
-Send Sotto an `id`, a `type`, and some `context`.
+Every request has an `id`, a `type`, and a `context`.
 
-The rules live inside `context.rules`.
+The context can contain the original `text` and the rules Sotto understood from it.
 
 ```json
 {
   "id": "pr-123",
   "type": "pull_request",
   "context": {
-    "time": "18:30",
-    "urgent": false,
+    "text": "Say no to pull requests before 9pm unless they're urgent.",
     "rules": [
       {
         "when": {
@@ -65,7 +62,11 @@ The rules live inside `context.rules`.
 }
 ```
 
-Sotto checks it and gives you:
+The `text` is what the person said. The `rules` are Sotto's structured understanding of it.
+
+When the API is called, the caller supplies the information the rules need to evaluate. Sotto does not store it.
+
+A successful response is always predictable:
 
 ```json
 {
@@ -82,13 +83,13 @@ You can send one request or a whole bunch at once.
 
 Don't feel like writing JSON?
 
-Just tell Sotto what you want in plain English.
+Just tell Sotto what you want in normal language.
 
 For example:
 
 > Say no to pull requests before 9pm unless they're urgent.
 
-Sotto turns it into JSON you can edit yourself.
+Sotto turns that into rules you can review and edit.
 
 You can also skip the UI and write the JSON yourself.
 
