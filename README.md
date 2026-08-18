@@ -4,7 +4,7 @@
 
 Sotto is a simple API built on top of [No-as-a-Service (NaaS)](https://github.com/hotheadhacker/no-as-a-service).
 
-Sotto keeps the simple idea of NaaS and adds a way for software to use the caller's own context and rules to return a consistent **No**.
+Sotto keeps the simple idea of NaaS and adds a way for software to use its own context and rules to get a consistent **No**.
 
 ## How it works
 
@@ -21,7 +21,7 @@ User edits the rules
  ↓
 User tests the rules
  ↓
-User locks/version them
+User locks the rules
  ↓
 Sotto gives them an API
  ↓
@@ -34,9 +34,11 @@ Sotto returns a deterministic No
 
 Sotto helps turn what you mean into rules that can be edited, tested, and used again.
 
-When the API is used, the caller sends an `id`, `type`, and flexible `context`. Sotto checks that context against the caller's locked rules and returns the same fixed response shape every time.
+The rules are **not stored by Sotto**. The caller owns the rules and sends them with the request. Sotto is stateless: it evaluates the rules against the current context and returns the result.
 
-Sotto does not control what the caller's software does with the response. The caller can use it however they want.
+The API key is only used for access, rate limits, and billing. It does not store or identify the caller's rules.
+
+Sotto does not run jobs, schedules, webhooks, or other automation. The caller's software decides when to call Sotto and what to do with the response.
 
 ## API
 
@@ -62,11 +64,16 @@ Request:
     "author": "john",
     "files_changed": 12,
     "tests_passed": false
+  },
+  "rules": {
+    "rules": []
   }
 }
 ```
 
 The `context` is flexible. Sotto does not require a specific domain. It can contain whatever information the caller needs to evaluate.
+
+The `rules` use Sotto's fixed rule format and can be created with the UI or written directly by the caller.
 
 Response:
 
@@ -84,7 +91,7 @@ The response always uses the same four fields:
 - `id` — the caller's ID, returned unchanged
 - `type` — the caller's request type
 - `decision` — Sotto's deterministic decision
-- `response` — the short response from the locked rule
+- `response` — the short response defined by the rule
 
 Sotto does not create or store the caller's `id`. It returns it so the caller can match the response to the original request.
 
@@ -94,10 +101,13 @@ Sotto does not create or store the caller's `id`. It returns it so the caller ca
 POST /check/batch
 ```
 
-Request:
+A batch request sends multiple `id`, `type`, and `context` objects using the same rules.
 
 ```json
 {
+  "rules": {
+    "rules": []
+  },
   "requests": [
     {
       "id": "pr-123",
@@ -117,32 +127,11 @@ Request:
 }
 ```
 
-Response:
-
-```json
-{
-  "results": [
-    {
-      "id": "pr-123",
-      "type": "pull_request",
-      "decision": "no",
-      "response": "Tests aren't passing yet."
-    },
-    {
-      "id": "pr-124",
-      "type": "pull_request",
-      "decision": "no",
-      "response": "I'm still saying no."
-    }
-  ]
-}
-```
-
-The same locked rules are used for every request in the batch.
+Each request gets its own result.
 
 ## Rules
 
-Sotto uses one fixed rule format. The caller's context can be different for every use case, but the rule structure stays the same.
+Sotto uses one fixed rule format. The context can be different for every use case, but the rule structure stays the same.
 
 The first version uses a small set of deterministic operators:
 
@@ -166,17 +155,17 @@ any
 not
 ```
 
-Sotto's AI helps translate natural language into this JSON. It does not change the rule format or make the final decision. The generated JSON is validated before it can be used.
+Sotto's AI helps translate natural language into this JSON. It does not make the final decision. The generated JSON is validated before it can be used.
 
-Users can edit the generated JSON themselves, test it, and lock a version when they are happy with it.
+Users can edit the generated JSON themselves, test it, and lock the version they want to use. The same rules can then be sent directly through the API without using the UI.
 
 ## API keys
 
-Each user starts with one API key.
+The API key is for access, rate limits, and billing.
 
 A user can have up to **3 API keys at the same time**. They can create a new key and delete an old one when needed.
 
-The API key identifies the user and their Sotto rules.
+The API key does not contain or store the user's rules.
 
 ## Classic NaaS
 
