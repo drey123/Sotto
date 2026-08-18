@@ -88,7 +88,7 @@ For example:
 
 > Say no to pull requests before 9pm unless they're urgent.
 
-Sotto turns that into JSON you can edit yourself.
+Sotto turns it into JSON you can edit yourself.
 
 You can also skip the UI and write the JSON yourself.
 
