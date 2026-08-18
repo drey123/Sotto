@@ -1,8 +1,8 @@
 # Sotto API — High-Level Design
 
-Sotto is a tiny API built on top of [No-as-a-Service (NaaS)](https://github.com/hotheadhacker/no-as-a-service).
+Sotto is a tiny API built on top of No-as-a-Service (NaaS).
 
-The idea is simple: **give Sotto what someone wants and the context needed to evaluate it, and get a No back.**
+The idea is simple: **give Sotto what someone wants and get a predictable No back.**
 
 ## 1. The API shape
 
@@ -23,26 +23,27 @@ id + type + decision + response
   "id": "pr-123",
   "type": "pull_request",
   "context": {
-    "text": "Say no to pull requests before 9pm unless they're urgent.",
+    "text": "Approve only pull requests after 9pm.",
     "rules": [
       {
         "when": {
-          "all": [
-            { "field": "time", "operator": "lt", "value": "21:00" },
-            { "field": "urgent", "operator": "eq", "value": false }
-          ]
+          "field": "time",
+          "operator": "gte",
+          "value": "21:00"
         },
         "decision": "no",
-        "response": "I'm busy before 9pm."
+        "response": "Not before 9pm."
       }
     ]
   }
 }
 ```
 
-`text` is the original instruction. `rules` are the structured representation of that instruction.
+`text` is the original instruction.
 
-The context may also contain any data needed by those rules when the request is evaluated. Sotto does not define domain-specific fields.
+`rules` are Sotto's structured understanding of that instruction.
+
+These are the two things Sotto needs from the user's meaning. Sotto does not require a second user-defined data model beside them.
 
 ### Output
 
@@ -51,51 +52,29 @@ The context may also contain any data needed by those rules when the request is 
   "id": "pr-123",
   "type": "pull_request",
   "decision": "no",
-  "response": "I'm busy before 9pm."
+  "response": "Not before 9pm."
 }
 ```
 
-`id` and `type` are returned so the response can be matched to the original request. Sotto does not store the `id`.
+`id` and `type` are returned so the caller can match the result to its own request. Sotto does not store the `id`.
 
 ---
 
 ## 2. Context
 
-`context` is intentionally flexible and domain-agnostic.
-
-It can describe anything the caller needs Sotto to evaluate: a pull request, payment, job, customer request, product, message, or something else.
-
-The important distinction is:
+`context` is the container for the two pieces above:
 
 ```text
-text  → what the person said
-rules → Sotto's structured understanding of it
-other context data → information the rules evaluate
+context
+ ├── text
+ └── rules
 ```
 
-Sotto does not require a predefined list of fields.
+`text` is what the person said.
 
-For example, one request might use:
+`rules` are what Sotto understood that text to mean in its fixed rule language.
 
-```json
-"context": {
-  "text": "Say no when the price is below $200.",
-  "price": 150,
-  "rules": []
-}
-```
-
-Another might use:
-
-```json
-"context": {
-  "text": "Say no if the tests are failing.",
-  "tests_passed": false,
-  "rules": []
-}
-```
-
-Fields belong to the caller's context, not to Sotto's built-in vocabulary.
+Sotto does not expose separate concepts such as `intent`, `facts`, or a predefined domain schema. Those distinctions are handled internally where needed.
 
 ---
 
@@ -117,7 +96,7 @@ The engine validates the rules before evaluation.
 
 ## 4. Sotto's small vocabulary
 
-Sotto uses a fixed vocabulary so the JSON stays predictable while the context stays flexible.
+Sotto uses a fixed vocabulary so the JSON stays predictable while the meaning of `text` can be flexible.
 
 ### Operators
 
@@ -141,7 +120,7 @@ Sotto uses a fixed vocabulary so the JSON stays predictable while the context st
 | `any` | at least one must match |
 | `not` | reverses the result |
 
-The vocabulary is fixed. Fields and values are flexible.
+The vocabulary is fixed. The LLM works within it.
 
 ---
 
@@ -191,7 +170,7 @@ For example:
 Say no to anyone under 18.
 ```
 
-The resulting rule could be:
+The LLM can represent that intent as:
 
 ```json
 {
@@ -205,7 +184,7 @@ The resulting rule could be:
 }
 ```
 
-The LLM translates the meaning into Sotto's known fields, operators, values, and rule structure. It cannot invent new Sotto operators or change the API shape.
+The LLM translates the meaning into Sotto's fixed rule structure. It cannot invent new Sotto operators or change the API shape.
 
 The generated JSON is validated before it can be used.
 
@@ -217,16 +196,16 @@ Users can edit the rules themselves when needed.
 
 ## 8. Deterministic evaluation
 
-Once the rules are valid, the final decision does not need an LLM.
+Once the rules are valid, the final result does not need an LLM.
 
 ```text
-context + rules
-      ↓
-   validate
-      ↓
-   evaluate
-      ↓
- decision + response
+text + rules
+     ↓
+  validate
+     ↓
+  evaluate
+     ↓
+decision + response
 ```
 
 The LLM helps translate what someone means. Sotto validates and evaluates the resulting rules.
@@ -246,19 +225,16 @@ The caller sends an `id`, `type`, and `context`.
   "id": "pr-123",
   "type": "pull_request",
   "context": {
-    "text": "Say no to pull requests before 9pm unless they're urgent.",
-    "time": "18:30",
-    "urgent": false,
+    "text": "Approve only pull requests after 9pm.",
     "rules": [
       {
         "when": {
-          "all": [
-            { "field": "time", "operator": "lt", "value": "21:00" },
-            { "field": "urgent", "operator": "eq", "value": false }
-          ]
+          "field": "time",
+          "operator": "gte",
+          "value": "21:00"
         },
         "decision": "no",
-        "response": "I'm busy before 9pm."
+        "response": "Not before 9pm."
       }
     ]
   }
@@ -272,7 +248,7 @@ Response:
   "id": "pr-123",
   "type": "pull_request",
   "decision": "no",
-  "response": "I'm busy before 9pm."
+  "response": "Not before 9pm."
 }
 ```
 
@@ -293,8 +269,7 @@ A batch contains multiple independent requests. Each item has its own `id`, `typ
       "id": "pr-123",
       "type": "pull_request",
       "context": {
-        "text": "Say no to non-urgent pull requests before 9pm.",
-        "urgent": false,
+        "text": "Say no before 9pm.",
         "rules": []
       }
     },
@@ -302,8 +277,7 @@ A batch contains multiple independent requests. Each item has its own `id`, `typ
       "id": "pr-124",
       "type": "pull_request",
       "context": {
-        "text": "Say no when tests are failing.",
-        "tests_passed": false,
+        "text": "Say no to urgent requests.",
         "rules": []
       }
     }
@@ -311,7 +285,7 @@ A batch contains multiple independent requests. Each item has its own `id`, `typ
 }
 ```
 
-Each item gets its own result. One invalid item should not make the other items impossible to process; the batch response should identify errors per item.
+Each item gets its own result.
 
 ---
 
@@ -335,7 +309,7 @@ This keeps Sotto simple and stateless.
 
 The software using Sotto decides when to call it.
 
-Sotto does not need cron jobs, webhooks, queues, or schedules to make a decision.
+Sotto does not need cron jobs, webhooks, queues, or schedules.
 
 ---
 
