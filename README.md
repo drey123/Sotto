@@ -30,7 +30,9 @@ That's it.
 
 ## The API
 
-Send Sotto an `id`, a `type`, some `context`, and your rules.
+Send Sotto an `id`, a `type`, and some `context`.
+
+The rules live inside `context.rules`.
 
 ```json
 {
@@ -38,9 +40,28 @@ Send Sotto an `id`, a `type`, some `context`, and your rules.
   "type": "pull_request",
   "context": {
     "time": "18:30",
-    "urgent": false
-  },
-  "rules": {}
+    "urgent": false,
+    "rules": [
+      {
+        "when": {
+          "all": [
+            {
+              "field": "time",
+              "operator": "lt",
+              "value": "21:00"
+            },
+            {
+              "field": "urgent",
+              "operator": "eq",
+              "value": false
+            }
+          ]
+        },
+        "decision": "no",
+        "response": "I'm busy before 9pm."
+      }
+    ]
+  }
 }
 ```
 
