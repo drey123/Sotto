@@ -302,13 +302,15 @@ Reverses another expression.
 
 ## 12. Multiple rules
 
-Rules are ordered, but their IDs are the durable identifiers.
+Rules are independent. Their IDs are the durable identifiers, and array position has no semantic meaning.
 
-**The first applicable rule wins.**
+Each rule is evaluated independently. Multiple rules from the same `context.rules[]` can match the same request.
 
-There is no hidden priority system.
+If no rule matches, the result is `decision: "none"`.
 
-If two rules could apply, the first one in the array produces the result.
+If one rule matches, Sotto returns that rule's `rule_id`, `decision`, and `response` using the normal response shape.
+
+If multiple rules match, Sotto does not silently choose one based on array position or assign an implicit priority. The API must identify the matching rules so the caller can decide how to use them in its own automation.
 
 The caller decides what to automate from the returned result. Sotto does not execute automation.
 
