@@ -1,0 +1,209 @@
+# android-bringup.yml — hosted Android virtual-device bring-up + browser install (generic).
+#
+# Boots an Android 11 (API 30, google_apis x86_64) emulator with KVM acceleration on a
+# hosted Linux runner (4 vCPU / 16 GB RAM), installs a Chromium for Android snapshot
+# build (ChromePublic.apk from the public chromium-browser-snapshots bucket), verifies
+# the install, and publishes:
+#   1. the post-install AVD (userdata + dexopt caches) as an artifact — any environment
+#      can then boot the pre-installed device locally (software emulation is fine for a
+#      warm boot; the expensive APK parse/install step is already done), and
+#   2. boot/install logs as evidence.
+#
+# Triggers: push-triggered on edits to this file; manual dispatch supported.
+#
+# Why KVM is required: the 243 MB Chromium APK parse must finish inside the framework
+# watchdog budget; software emulation (TCG) on hosted runners does not meet that budget.
+# If /dev/kvm is absent the job fails fast with a clear marker (that is itself the
+# measurement).
+
+name: android-bringup
+
+on:
+  workflow_dispatch: {}
+  push:
+    paths:
+      - '.github/workflows/android-bringup.yml'
+
+permissions:
+  contents: read
+
+env:
+  API_LEVEL: '30'
+  IMG_ABI: x86_64
+  IMG_TAG: google_apis
+  AVD_NAME: rig
+  CHROME_SNAPSHOT_REV: '1700587'   # chromium-browser-snapshots/Android rev to install
+
+concurrency:
+  group: android-bringup
+  cancel-in-progress: false
+
+jobs:
+  bringup:
+    name: Android VD bring-up (KVM) + browser install
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: KVM probe (fail fast with a clear marker if absent)
+        run: |
+          if [ -e /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo "KVM-PRESENT $(ls -la /dev/kvm)"
+          else
+            echo "KVM-ABSENT — hosted Android install is not viable without KVM"
+            ls -la /dev/kvm 2>&1 || true
+            exit 78  # skip-style failure: configuration error, recorded honestly
+          fi
+
+      - name: Free runner disk (emulator + images + artifact staging)
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+                      /usr/share/swift /usr/share/miniconda
+          df -h /
+          echo "JOB-START $(date -u +%FT%TZ)"
+
+      - name: Install Android SDK (cmdline-tools + platform-tools + emulator + system image)
+        run: |
+          set -euo pipefail
+          SDK="$HOME/android-sdk"
+          mkdir -p "$SDK/cmdline-tools"
+          curl -sSLo /tmp/clt.zip \
+            https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q /tmp/clt.zip -d "$SDK/cmdline-tools"
+          mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"
+          export ANDROID_HOME="$SDK"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install \
+            "platform-tools" \
+            "emulator" \
+            "system-images;android-${{ env.API_LEVEL }};${{ env.IMG_TAG }};${{ env.IMG_ABI }}" \
+            > /tmp/sdkmanager.log 2>&1
+          tail -3 /tmp/sdkmanager.log
+          ls "$SDK/system-images/android-${{ env.API_LEVEL }}/${{ env.IMG_TAG }}/${{ env.IMG_ABI }}/"
+
+      - name: Create AVD
+        run: |
+          set -euo pipefail
+          echo "no" | avdmanager create avd -n "${{ env.AVD_NAME }}" \
+            -k "system-images;android-${{ env.API_LEVEL }};${{ env.IMG_TAG }};${{ env.IMG_ABI }}" \
+            -d pixel_5
+          avdmanager list avd | head -12
+
+      - name: Boot emulator (KVM, headless, software GL)
+        run: |
+          set -euo pipefail
+          nohup "$ANDROID_HOME/emulator/emulator" \
+            -avd "${{ env.AVD_NAME }}" \
+            -accelerator on \
+            -gpu swiftshader_indirect \
+            -no-window -no-audio -no-boot-anim -no-snapshot \
+            -memory 8192 \
+            > /tmp/emulator.log 2>&1 &
+          echo "EMULATOR-LAUNCHED $(date -u +%FT%TZ)"
+
+      - name: Wait for full boot (sys.boot_completed=1)
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          adb wait-for-device
+          for i in $(seq 1 120); do
+            BOOT=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+            if [ "$BOOT" = "1" ]; then
+              echo "BOOT-COMPLETED $(date -u +%FT%TZ) after ~$((i*5))s of polling"
+              break
+            fi
+            sleep 5
+            if [ "$i" = "120" ]; then
+              echo "BOOT-TIMEOUT — emulator log tail:"
+              tail -50 /tmp/emulator.log
+              adb shell dumpsys activity processes 2>/dev/null | head -5 || true
+              exit 1
+            fi
+          done
+          adb devices -l
+
+      - name: adb root + identity
+        run: |
+          set -euo pipefail
+          adb root
+          sleep 3
+          adb wait-for-device
+          adb shell id
+          adb shell getprop ro.build.version.release
+          adb shell getprop ro.product.cpu.abi
+          adb shell cat /proc/meminfo | head -2
+
+      - name: Fetch Chromium for Android snapshot (ChromePublic.apk)
+        run: |
+          set -euo pipefail
+          URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/Android/${{ env.CHROME_SNAPSHOT_REV }}/ChromePublic.apk"
+          echo "FETCH $URL"
+          curl -sSLo /tmp/ChromePublic.apk "$URL"
+          ls -la /tmp/ChromePublic.apk
+          sha256sum /tmp/ChromePublic.apk
+
+      - name: Install ChromePublic.apk (KVM budget; generous timeout)
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          adb install -r -g /tmp/ChromePublic.apk 2>&1 | tee /tmp/install.log
+          grep -q "Success" /tmp/install.log || { echo "INSTALL-FAILED"; exit 1; }
+          echo "INSTALL-SUCCESS $(date -u +%FT%TZ)"
+
+      - name: Verify install (package + version + activity resolve)
+        run: |
+          set -euo pipefail
+          adb shell dumpsys package org.chromium.chrome | grep -E "versionName|versionCode|firstInstallTime|lastUpdateTime" | head -6
+          adb shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER org.chromium.chrome | tail -2
+
+      - name: Launch browser + capture evidence (generic smoke)
+        run: |
+          set -euo pipefail
+          adb shell am start -n org.chromium.chrome/com.google.android.apps.chrome.Main \
+            -d 'about:version' > /tmp/am_start.log 2>&1 || \
+            adb shell monkey -p org.chromium.chrome -c android.intent.category.LAUNCHER 1 > /tmp/am_start.log 2>&1
+          sleep 20
+          adb shell screencap -p /sdcard/bringup_screen.png
+          adb pull /sdcard/bringup_screen.png /tmp/bringup_screen.png || true
+          adb shell "dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity' | head -3" || true
+          adb shell ps -A | grep -E "chrom" | head -5 || true
+
+      - name: Clean shutdown (flush userdata for artifact)
+        run: |
+          set -euo pipefail
+          adb emu kill || true
+          for i in $(seq 1 30); do
+            pgrep -f "emulator.*${{ env.AVD_NAME }}" > /dev/null || { echo "EMULATOR-EXITED cleanly"; break; }
+            sleep 2
+          done
+          pgrep -f "emulator.*${{ env.AVD_NAME }}" && { echo "EMULATOR-STILL-RUNNING"; pkill -f "emulator.*${{ env.AVD_NAME }}" || true; sleep 5; } || true
+
+      - name: Stage artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/avd-artifact" "$GITHUB_WORKSPACE/logs"
+          cp -a "$HOME/.android/avd/${{ env.AVD_NAME }}.avd" "$GITHUB_WORKSPACE/avd-artifact/avd" 2>/dev/null || \
+            cp -a "$HOME/.android/avd" "$GITHUB_WORKSPACE/avd-artifact/avd"
+          cp /tmp/emulator.log /tmp/install.log /tmp/am_start.log "$GITHUB_WORKSPACE/logs/" 2>/dev/null || true
+          cp /tmp/bringup_screen.png "$GITHUB_WORKSPACE/logs/" 2>/dev/null || true
+          [ -f /tmp/ChromePublic.apk ] && sha256sum /tmp/ChromePublic.apk > "$GITHUB_WORKSPACE/logs/apk_sha256.txt"
+          du -sh "$GITHUB_WORKSPACE/avd-artifact" "$GITHUB_WORKSPACE/logs"
+          df -h / || true
+
+      - name: Upload post-install AVD artifact (retention 14 days)
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-avd-postinstall
+          path: avd-artifact/
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload evidence logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-bringup-logs
+          path: logs/
+          retention-days: 30
+          if-no-files-found: warn

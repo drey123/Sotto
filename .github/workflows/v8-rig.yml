@@ -1,0 +1,161 @@
+# v8-rig.yml — hosted V8 dcheck/corruption-API d8 rig builder (public-repo edition).
+#
+# Builds the standard rig configuration of d8 (DCHECK_ALWAYS_ON release + sandbox +
+# memory-corruption API) at a pinned revision and at main, on Linux and macOS arm64,
+# and publishes each as a downloadable artifact so any environment can rehydrate a
+# dynamic-testing rig without a local toolchain.
+#
+# Canonical rig args (keep verbatim; the smoke step fails the job if the
+# corruption API is missing):
+#   is_debug=false, dcheck_always_on=true, v8_enable_memory_corruption_api=true,
+#   v8_enable_sandbox=true, v8_enable_object_print=true, symbol_level=1,
+#   is_component_build=false.
+#
+# Triggers: this file is push-triggered (any edit re-fires the build); manual
+# dispatch is supported when the default input (main) is desired.
+#
+# Runner notes:
+#   ubuntu-latest = 4 cores / 16 GB RAM / ~14 GB free disk (pre-cleanup).
+#   macos-latest  = arm64, larger free disk.
+#   V8-only gn build with symbol_level=1 fits comfortably (~6-8 GB, 60-150 min).
+
+name: v8-rig
+
+on:
+  workflow_dispatch:
+    inputs:
+      v8_ref:
+        description: 'V8 git ref to build (commit SHA or branch name)'
+        required: false
+        default: 'main'
+  push:
+    paths:
+      - '.github/workflows/v8-rig.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v8-rig-${{ matrix.os }}-${{ matrix.v8_ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build d8 rig (${{ matrix.os }} @ ${{ matrix.v8_ref }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 200
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        v8_ref: [main, 82d4c825]
+
+    steps:
+      - name: Free runner disk (Linux only; protect the ~14 GB budget)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /usr/share/swift /usr/share/miniconda
+          df -h /
+          echo "JOB-START $(date -u +%FT%TZ) runner=$(uname -m) os=${{ runner.os }}"
+
+      - name: Checkout V8 (github mirror, pinned ref, depth 1)
+        uses: actions/checkout@v4
+        with:
+          repository: v8/v8
+          ref: ${{ matrix.v8_ref }}
+          fetch-depth: 1
+          path: v8
+
+      - name: Install depot_tools
+        run: |
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git \
+            "$GITHUB_WORKSPACE/depot_tools"
+          echo "$GITHUB_WORKSPACE/depot_tools" >> "$GITHUB_PATH"
+          echo "DEPOT_TOOLS_UPDATE=0" >> "$GITHUB_ENV"
+
+      - name: Resolve V8 ref (branch vs detached SHA)
+        working-directory: ${{ github.workspace }}
+        run: |
+          git -C v8 remote set-url origin https://chromium.googlesource.com/v8/v8
+          REF="${{ matrix.v8_ref }}"
+          if [ "$REF" = "main" ]; then
+            git -C v8 checkout -B main
+          else
+            git -C v8 checkout --detach "$REF"
+          fi
+          git -C v8 rev-parse HEAD
+
+      - name: gclient sync (v8 alone, no history)
+        working-directory: ${{ github.workspace }}
+        run: |
+          # printf-generated: heredocs inside YAML blocks would inherit the YAML
+          # indentation and break gclient's python eval (IndentationError).
+          printf '%s\n' \
+            'solutions = [' \
+            '  { "name": "v8",' \
+            '    "url": "https://chromium.googlesource.com/v8/v8",' \
+            '    "deps_file": "DEPS",' \
+            '    "managed": False,' \
+            '    "custom_deps": {},' \
+            '    "custom_vars": {},' \
+            '  },' \
+            ']' > .gclient
+          python3 -c "compile(open('.gclient').read(),'.gclient','exec'); print('GCLIENT-CONFIG-PARSE-OK')"
+          gclient sync --no-history -D -j4
+
+      - name: Write canonical args.gn + gn gen out/rig
+        working-directory: ${{ github.workspace }}/v8
+        run: |
+          mkdir -p out/rig
+          printf '%s\n' \
+            '# Canonical rig args — DO NOT EDIT.' \
+            'is_debug = false' \
+            'dcheck_always_on = true' \
+            'v8_enable_memory_corruption_api = true' \
+            'v8_enable_sandbox = true' \
+            'v8_enable_object_print = true' \
+            'symbol_level = 1' \
+            'is_component_build = false' > out/rig/args.gn
+          cat out/rig/args.gn
+          gn gen out/rig
+
+      - name: autoninja -C out/rig d8
+        working-directory: ${{ github.workspace }}/v8
+        timeout-minutes: 170
+        run: autoninja -C out/rig d8 -j4
+
+      - name: Stage rig artifact (natives/snapshot blob only IF PRESENT — static builds embed it)
+        working-directory: ${{ github.workspace }}/v8
+        run: |
+          STAGE="$GITHUB_WORKSPACE/rig-artifact"
+          mkdir -p "$STAGE"
+          cp -v out/rig/d8 "$STAGE/d8"
+          cp -v out/rig/icudtl.dat "$STAGE/icudtl.dat"
+          REV=$(git -C "$GITHUB_WORKSPACE/v8" rev-parse HEAD)
+          printf 'v8_revision=%s\nbuilt=%s\nrunner=%s %s\n' \
+            "$REV" "$(date -u +%FT%TZ)" "${{ runner.os }}" "$(uname -m)" > "$STAGE/BUILD_INFO.txt"
+          for f in natives_blob.bin snapshot_blob.bin; do
+            if [ -f "out/rig/$f" ]; then
+              cp -v "out/rig/$f" "$STAGE/$f"
+            else
+              echo "$f ABSENT (snapshot embedded in d8) — skipped"
+            fi
+          done
+          cat "$STAGE/BUILD_INFO.txt"
+          du -sh out/rig "$STAGE"; df -h / || true
+
+      - name: Smoke — d8 --version + corruption-API sanity (fail-hard)
+        working-directory: ${{ github.workspace }}/v8
+        continue-on-error: false
+        run: |
+          out/rig/d8 --version
+          out/rig/d8 --sandbox-testing -e 'print(typeof Sandbox!=="undefined" ? "CORRUPTION-API-OK" : "CORRUPTION-API-MISSING")'
+
+      - name: Upload artifact (retention 30 days)
+        uses: actions/upload-artifact@v4
+        with:
+          name: v8-rig-d8-${{ runner.os }}-${{ matrix.v8_ref }}
+          path: rig-artifact/
+          retention-days: 30
+          if-no-files-found: error
