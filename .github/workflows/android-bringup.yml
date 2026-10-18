@@ -249,9 +249,22 @@ jobs:
         run: |
           set -euo pipefail
           AVD_DIR="$HOME/.android/avd/${{ env.AVD_NAME }}.avd"
-          qemu-img convert -O qcow2 "$AVD_DIR/userdata-qemu.img" "$AVD_DIR/userdata-qemu.qcow2"
+          # v8: ubuntu-latest runners do NOT ship qemu-utils (v7 failed here, exit 127).
+          # Resolve qemu-img: prefer the emulator package's bundled binary; fall back
+          # to an apt install of qemu-utils if the bundled one is absent.
+          QEMU_IMG="$ANDROID_HOME/emulator/qemu-img"
+          if [ ! -x "$QEMU_IMG" ]; then
+            echo "bundled qemu-img not found — installing qemu-utils"
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq qemu-utils
+            QEMU_IMG="$(command -v qemu-img)"
+          fi
+          [ -n "$QEMU_IMG" ] && [ -x "$QEMU_IMG" ] || { echo "qemu-img unavailable"; exit 1; }
+          echo "QEMU_IMG=$QEMU_IMG"
+          "$QEMU_IMG" --version | head -1
+          "$QEMU_IMG" convert -O qcow2 "$AVD_DIR/userdata-qemu.img" "$AVD_DIR/userdata-qemu.qcow2"
           mv "$AVD_DIR/userdata-qemu.qcow2" "$AVD_DIR/userdata-qemu.img"
-          qemu-img info "$AVD_DIR/userdata-qemu.img"
+          "$QEMU_IMG" info "$AVD_DIR/userdata-qemu.img"
           ls -la "$AVD_DIR/" | head -10
 
       - name: Stage artifacts
