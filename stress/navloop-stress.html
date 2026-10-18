@@ -8,11 +8,12 @@
   evidence (logcat, crash buffers) under load.
 
   Modes (URL params):
-    ?mode=idle   default: page stays put; logs visibility/orientation
-                 transitions only (background churn control)
-    ?mode=loop   navigation loop: location.assign() to a fresh ?i=N URL
-                 every dwell period (cross-document navigations; no
-                 history.replace, no reloads)
+    ?mode=idle    default: page stays put; logs visibility/orientation
+                  transitions only (background churn control)
+    ?mode=loop    navigation loop: location.assign() to a fresh ?i=N URL
+                  every dwell period (cross-document navigations; no
+                  history.replace, no reloads)
+    ?mode=navonly identical loop; the host harness skips backgrounding
     &dwell=700   ms between navigations (loop mode)
     &maxnav=2000 hard cap on navigations per tab (safety)
 
@@ -49,6 +50,7 @@
 </header>
 <div id="log" class="ln"></div>
 <div id="copybar"><button id="copy">copy session log</button></div>
+<img id="slowtail" width="1" height="1" style="position:fixed;opacity:0.01" alt="">
 <script>
 (function () {
   'use strict';
@@ -62,6 +64,7 @@
   });
 
   var MODE    = q.mode || 'idle';
+  var LOOPS   = (MODE === 'loop' || MODE === 'navonly');
   var DWELL   = Math.max(120, parseInt(q.dwell || '700', 10) || 700);
   var MAXNAV  = Math.min(20000, parseInt(q.maxnav || '2000', 10) || 2000);
 
@@ -141,7 +144,7 @@
     location.assign(u);
   }
   function armLoop () {
-    if (MODE !== 'loop' || stopped) { return; }
+    if (!LOOPS || stopped) { return; }
     if (navTimer) { clearTimeout(navTimer); }
     var elapsed = Date.now() - t0;
     var wait = Math.max(0, DWELL - (elapsed % DWELL));
@@ -156,13 +159,19 @@
       ' ua="' + navigator.userAgent.slice(0, 80) + '" dpr=' + (window.devicePixelRatio || '?') +
       ' vw=' + window.innerWidth + 'x' + window.innerHeight);
   if (navigator.deviceMemory !== undefined) { out('deviceMemory (approx): ' + navigator.deviceMemory); }
-  if (MODE === 'loop') {
+  if (LOOPS) {
     setInterval(function () { setStat('c_dt', ((Date.now() - t0) / 1000).toFixed(0)); }, 1000);
     armLoop();
   } else {
     out('idle mode: no navigation loop; logging visibility only');
   }
   if (q.fresh === '1') { out('fresh session requested'); }
+  if (LOOPS) {
+    // slow tail resource: the document stays loading while the navigation
+    // loop commits — keeps in-flight work stranded at commit time
+    var st = document.getElementById('slowtail');
+    if (st) { st.src = '/slow.png?r=' + Date.now(); }
+  }
 })();
 </script>
 </body>

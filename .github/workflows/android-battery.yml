@@ -251,9 +251,11 @@ jobs:
           # full logcat capture from this point on (background, threadtime, all buffers)
           nohup adb logcat -v threadtime >> /tmp/logcat_full.log 2>&1 &
           echo "LOGCAT-CAPTURE-STARTED $(date -u +%FT%TZ)"
-          # serve the stress dir on a fixed high port
+          # serve the stress dir on a fixed high port (slow-tail capable:
+          # /slow.png responses are delayed so page loads stay in-flight
+          # across navigation commits)
           PORT=8791
-          nohup python3 -m http.server "$PORT" --directory "$GITHUB_WORKSPACE/stress" > /tmp/httpserver.log 2>&1 &
+          nohup python3 "$GITHUB_WORKSPACE/scripts/serve_slow.py" "$PORT" "$GITHUB_WORKSPACE/stress" > /tmp/httpserver.log 2>&1 &
           sleep 2
           curl -s -o /dev/null -w "http-server-selftest=%{http_code}\n" "http://localhost:$PORT/${{ env.PAGE }}"
           timeout 15 adb reverse "tcp:$PORT" "tcp:$PORT" && echo "ADB-REVERSE-OK port $PORT"
