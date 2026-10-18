@@ -245,6 +245,15 @@ jobs:
           done
           pgrep -f "emulator.*${{ env.AVD_NAME }}" && { echo "EMULATOR-STILL-RUNNING"; pkill -f "emulator.*${{ env.AVD_NAME }}" || true; sleep 5; } || true
 
+      - name: Compact userdata to qcow2 (smaller artifact + compact local footprint)
+        run: |
+          set -euo pipefail
+          AVD_DIR="$HOME/.android/avd/${{ env.AVD_NAME }}.avd"
+          qemu-img convert -O qcow2 "$AVD_DIR/userdata-qemu.img" "$AVD_DIR/userdata-qemu.qcow2"
+          mv "$AVD_DIR/userdata-qemu.qcow2" "$AVD_DIR/userdata-qemu.img"
+          qemu-img info "$AVD_DIR/userdata-qemu.img"
+          ls -la "$AVD_DIR/" | head -10
+
       - name: Stage artifacts
         run: |
           set -euo pipefail
