@@ -434,6 +434,7 @@ jobs:
           cp /tmp/emulator.log /tmp/install.log /tmp/am_start.log /tmp/httpserver.log "$GITHUB_WORKSPACE/battery-logs/" 2>/dev/null || true
           cp /tmp/launch_state.png "$GITHUB_WORKSPACE/battery-logs/" 2>/dev/null || true
           cp /tmp/ui_dump.xml "$GITHUB_WORKSPACE/battery-logs/" 2>/dev/null || true
+          cp /tmp/ui_dump_round*.xml "$GITHUB_WORKSPACE/battery-logs/" 2>/dev/null || true
           [ -f /tmp/ChromePublic.apk ] && sha256sum /tmp/ChromePublic.apk > "$GITHUB_WORKSPACE/battery-logs/apk_sha256.txt"
           du -sh "$GITHUB_WORKSPACE/battery-logs" || true
           df -h / || true
