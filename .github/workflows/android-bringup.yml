@@ -196,8 +196,13 @@ jobs:
           sha256sum /tmp/chrome-android.zip
           unzip -l /tmp/chrome-android.zip | head -15
           unzip -o -q /tmp/chrome-android.zip -d /tmp/chrome-android
-          APK="$(find /tmp/chrome-android -name '*.apk' -type f | head -1)"
-          [ -n "$APK" ] || { echo "NO APK inside chrome-android.zip"; exit 1; }
+          APK="$(find /tmp/chrome-android -name 'ChromePublic.apk' -type f | head -1)"
+          if [ -z "$APK" ]; then
+            echo "ChromePublic.apk not found — zip contents:"
+            find /tmp/chrome-android -name '*.apk' -type f
+            APK="$(find /tmp/chrome-android -name '*.apk' -type f | head -1)"
+            [ -n "$APK" ] || { echo "NO APK inside chrome-android.zip"; exit 1; }
+          fi
           echo "APK found: $APK"
           cp -v "$APK" /tmp/ChromePublic.apk
           ls -la /tmp/ChromePublic.apk
@@ -214,7 +219,8 @@ jobs:
       - name: Verify install (package + version + activity resolve)
         run: |
           set -euo pipefail
-          adb shell dumpsys package org.chromium.chrome | grep -E "versionName|versionCode|firstInstallTime|lastUpdateTime" | head -6
+          adb shell dumpsys package org.chromium.chrome | grep -E "versionName|versionCode|firstInstallTime|lastUpdateTime" | head -6 \
+            || { echo "dumpsys grep empty — installed chrome-family packages:"; adb shell pm list packages | grep -i chrom || true; exit 1; }
           adb shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER org.chromium.chrome | tail -2
 
       - name: Launch browser + capture evidence (generic smoke)
