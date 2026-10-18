@@ -42,7 +42,7 @@ env:
   AVD_NAME: rig
   CHROME_SNAPSHOT_REV: '1721527'   # chromium-browser-snapshots/AndroidDesktop_x64 rev (trunk 389904a0; native x86_64 build)
   RAM_MB: '8192'                   # guest RAM (high-RAM device class)
-  BATTERY_MODES: 'idle,loop,navonly'  # v2: full matrix — background-churn control + stress + churn-control
+  BATTERY_MODES: 'idle,loop,navonly'  # full matrix — background-churn control + stress + churn-control (session 3: identical config for the rate bound)
   CYCLES: '60'
   DWELL_MS: '700'
   BG_HOLD_S: '2'
