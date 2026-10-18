@@ -1,0 +1,35 @@
+name: Rule coverage benchmark
+
+on:
+  push:
+    paths:
+      - 'research/rule-coverage/**'
+      - '.github/workflows/rule-coverage.yml'
+  pull_request:
+    paths:
+      - 'research/rule-coverage/**'
+      - '.github/workflows/rule-coverage.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run unit tests
+        working-directory: research/rule-coverage
+        run: python -m unittest -v test_engine.py
+
+      - name: Run coverage benchmark
+        working-directory: research/rule-coverage
+        run: python engine.py
