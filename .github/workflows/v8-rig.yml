@@ -35,10 +35,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: v8-rig
-  cancel-in-progress: false
-
 jobs:
   build:
     name: Build d8 rig (${{ matrix.os }} @ ${{ matrix.v8_ref }})
@@ -48,7 +44,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        v8_ref: [main, 82d4c825]
+        v8_ref: [main, 82d4c8258863441530dc9d98f6f99b7e71bf5651]
 
     steps:
       - name: Free runner disk (Linux only; protect the ~14 GB budget)
