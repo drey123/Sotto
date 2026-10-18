@@ -42,7 +42,7 @@ env:
   AVD_NAME: rig
   CHROME_SNAPSHOT_REV: '1721527'   # chromium-browser-snapshots/AndroidDesktop_x64 rev (trunk 389904a0; native x86_64 build)
   RAM_MB: '8192'                   # guest RAM (high-RAM device class)
-  BATTERY_MODES: 'idle,loop,navonly'  # full matrix — background-churn control + stress + churn-control (session 3: identical config for the rate bound)
+  BATTERY_MODES: 'idle,loop,navonly,rot'  # full matrix + rotation surface-death variant
   CYCLES: '60'
   DWELL_MS: '700'
   BG_HOLD_S: '2'
@@ -351,10 +351,26 @@ jobs:
               fi
             done
 
-            # background/foreground churn loop
+            # background/foreground churn loop (rot mode: device rotation flips —
+            # a surface destruction/recreation variant; original rotation state is
+            # captured once and restored at session end)
+            ORIG_ROT=""
+            if [ "$MODE" = "rot" ]; then
+              timeout 15 adb shell settings put system accelerometer_rotation 0 || true
+              ORIG_ROT=$(timeout 15 adb shell settings get system user_rotation 2>/dev/null | tr -d '\r' || true)
+              echo "rotation variant: original user_rotation='${ORIG_ROT:-0}' (restored at session end)"
+            fi
             for c in $(seq 1 "$CYCLES"); do
               echo "cycle $c/ $CYCLES [$(date -u +%T)]"
-              if [ "$MODE" != "navonly" ]; then
+              if [ "$MODE" = "rot" ]; then
+                sleep "${{ env.FG_DWELL_S }}"
+                TARGET=$(( (c % 2) ))
+                timeout 15 adb shell settings put system user_rotation "$TARGET" || true
+                sleep "${{ env.BG_HOLD_S }}"
+                timeout 15 adb shell input keyevent KEYCODE_HOME || true
+                sleep 1
+                timeout 25 adb shell monkey -p ${{ env.PACKAGE }} -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+              elif [ "$MODE" != "navonly" ]; then
                 sleep "${{ env.FG_DWELL_S }}"
                 timeout 15 adb shell input keyevent KEYCODE_HOME || true
                 sleep "${{ env.BG_HOLD_S }}"
@@ -377,6 +393,12 @@ jobs:
               fi
             done
 
+            # restore original rotation state for the rot variant
+            if [ "$MODE" = "rot" ] && [ -n "$ORIG_ROT" ]; then
+              timeout 15 adb shell settings put system user_rotation "${ORIG_ROT}" || true
+              timeout 15 adb shell settings put system accelerometer_rotation 1 || true
+              echo "rotation restored to '${ORIG_ROT}' + accelerometer re-enabled"
+            fi
             # settle + per-session captures
             sleep 5
             echo "=== SESSION $SESS END ===" >> /tmp/logcat_full.log
