@@ -179,15 +179,22 @@ jobs:
 
       - name: adb root, identity, RAM verification
         run: |
-          set -euo pipefail
-          adb root
+          set -uo pipefail
+          # adb root restarts adbd — the immediate reconnect can race closed;
+          # retry both the root request and the wait
+          for attempt in 1 2 3; do
+            timeout 20 adb root && break || { echo "adb root attempt ${attempt} failed; waiting"; sleep 8; }
+          done
+          sleep 5
+          timeout 30 adb wait-for-device || true
+          timeout 20 adb root || true
           sleep 3
-          adb wait-for-device
-          timeout 15 adb shell id
-          timeout 15 adb shell getprop ro.build.version.release
-          timeout 15 adb shell getprop ro.product.cpu.abi
-          MEM_KB=$(timeout 15 adb shell cat /proc/meminfo 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r')
-          echo "MEMTOTAL_KB=$MEM_KB"
+          timeout 30 adb wait-for-device || true
+          timeout 15 adb shell id || true
+          timeout 15 adb shell getprop ro.build.version.release || true
+          timeout 15 adb shell getprop ro.product.cpu.abi || true
+          MEM_KB=$(timeout 15 adb shell cat /proc/meminfo 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r' || true)
+          echo "MEMTOTAL_KB=${MEM_KB:-unavailable}"
           # keep screen on and animations at scale 1 (accessibility reduce-animations must be OFF)
           timeout 15 adb shell svc power stayon true || true
           CUR=$(timeout 15 adb shell settings get global animator_duration_scale 2>/dev/null | tr -d '\r' || true)
@@ -404,8 +411,8 @@ jobs:
           echo ""
           echo "=== DEVICE/CHROME IDENTITY (report-back) ==="
           { timeout 15 adb shell getprop ro.build.version.release || true; \
-            timeout 20 adb shell dumpsys package ${{ env.PACKAGE }} | grep -E "versionName|versionCode" | head -2 || true; \
-            timeout 15 adb shell cat /proc/meminfo | head -1 || true; } | tee /tmp/battery/identity.txt
+            timeout 20 adb shell dumpsys package ${{ env.PACKAGE }} 2>/dev/null | grep -E "versionName|versionCode" | head -2 || true; \
+            timeout 15 adb shell cat /proc/meminfo 2>/dev/null | head -1 || true; } | tee /tmp/battery/identity.txt || true
 
       - name: Clean shutdown
         if: always()
