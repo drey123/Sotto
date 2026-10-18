@@ -63,10 +63,15 @@ jobs:
           fetch-depth: 1
           path: v8
 
-      - name: Install depot_tools
+      - name: Install depot_tools (+ CIPD bootstrap for gn/ninja wrappers)
         run: |
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git \
             "$GITHUB_WORKSPACE/depot_tools"
+          # The gn/autoninja wrappers require depot_tools' CIPD bootstrap
+          # (python3_bin_reldir.txt is only created by ensure_bootstrap/update).
+          ( cd "$GITHUB_WORKSPACE/depot_tools" && ./ensure_bootstrap ) || \
+            ( cd "$GITHUB_WORKSPACE/depot_tools" && ./update_depot_tools ) || \
+            echo "WARN: bootstrap scripts absent — relying on wrapper fallbacks"
           echo "$GITHUB_WORKSPACE/depot_tools" >> "$GITHUB_PATH"
           echo "DEPOT_TOOLS_UPDATE=0" >> "$GITHUB_ENV"
 
