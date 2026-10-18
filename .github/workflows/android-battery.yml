@@ -258,26 +258,36 @@ jobs:
           set -uo pipefail
           PAGE_URL="http://localhost:${{ env.BATTERY_PORT }}/${{ env.PAGE }}?mode=idle&fresh=1"
           # optional: command-line file (honored by continuous builds; harmless if ignored)
-          timeout 15 adb shell "printf 'chrome --no-first-run --no-default-browser-check --disable-sync --disable-component-update --disable-background-networking --enable-logging=stderr --v=0\n' > /data/local/tmp/chrome-command-line" || true
+          timeout 15 adb shell "printf 'chrome --no-first-run --no-default-browser-check --disable-component-update --enable-logging --v=0\n' > /data/local/tmp/chrome-command-line" || true
           timeout 15 adb shell chmod 644 /data/local/tmp/chrome-command-line || true
 
           echo "=== FIRST LAUNCH ==="
           timeout 25 adb shell am start -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "$PAGE_URL" 2>&1 | tee /tmp/am_start.log
           sleep 12
 
-          # first-run dismissal loop: dump UI, find primary button, tap, repeat
-          for round in 1 2 3 4 5; do
+          # first-run dismissal loop: dump UI, find primary button, tap, repeat.
+          # NOTE: --disable-sync must NOT be in the command line — the first-run
+          # SigninFRMediator dereferences SyncService and NPEs when sync is disabled
+          # (observed: FATAL EXCEPTION NullPointerException -> self SIGKILL).
+          for round in 1 2 3 4 5 6 7 8; do
+            FRE=$(timeout 20 adb shell "dumpsys activity activities | grep -c 'firstrun.FirstRunActivity'" 2>/dev/null | tr -d '\r' || true)
+            if [ "${FRE:-0}" = "0" ]; then
+              echo "round ${round}: FirstRunActivity no longer present (dismissed or completed)"
+              break
+            fi
             timeout 20 adb shell uiautomator dump /sdcard/ui_dump.xml >/dev/null 2>&1 || true
             timeout 20 adb pull /sdcard/ui_dump.xml /tmp/ui_dump.xml >/dev/null 2>&1 || true
-            if [ ! -s /tmp/ui_dump.xml ]; then echo "ui dump round ${round}: EMPTY"; break; fi
+            cp /tmp/ui_dump.xml "/tmp/ui_dump_round${round}.xml" 2>/dev/null || true
+            if [ ! -s /tmp/ui_dump.xml ]; then echo "ui dump round ${round}: EMPTY"; sleep 3; continue; fi
             BTN=$(python3 "$GITHUB_WORKSPACE/scripts/find_fre_button.py" /tmp/ui_dump.xml 2>/dev/null || true)
             if [ -z "$BTN" ]; then
-              echo "round ${round}: no first-run button found in UI dump"
-              break
+              echo "round ${round}: FRE present but no button found in UI dump"
+              sleep 3
+              continue
             fi
             echo "round ${round}: tapping first-run button at $BTN"
             timeout 15 adb shell input tap $BTN
-            sleep 3
+            sleep 4
           done
 
           sleep 5
@@ -315,6 +325,22 @@ jobs:
             URL="http://localhost:${{ env.BATTERY_PORT }}/${{ env.PAGE }}?mode=${MODE}&fresh=1&dwell=${{ env.DWELL_MS }}"
             timeout 25 adb shell am start -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "$URL" 2>&1 | tail -2
             sleep 5
+            # first-run can re-surface on a fresh profile until fully completed —
+            # run a short dismissal pass at each session start as well
+            for round in 1 2 3 4; do
+              FRE=$(timeout 20 adb shell "dumpsys activity activities | grep -c 'firstrun.FirstRunActivity'" 2>/dev/null | tr -d '\r' || true)
+              if [ "${FRE:-0}" = "0" ]; then break; fi
+              timeout 20 adb shell uiautomator dump /sdcard/ui_dump.xml >/dev/null 2>&1 || true
+              timeout 20 adb pull /sdcard/ui_dump.xml /tmp/ui_dump.xml >/dev/null 2>&1 || true
+              BTN=$(python3 "$GITHUB_WORKSPACE/scripts/find_fre_button.py" /tmp/ui_dump.xml 2>/dev/null || true)
+              if [ -n "$BTN" ]; then
+                echo "session ${MODE} dismissal round ${round}: tapping $BTN"
+                timeout 15 adb shell input tap $BTN
+                sleep 4
+              else
+                sleep 3
+              fi
+            done
 
             # background/foreground churn loop
             for c in $(seq 1 "$CYCLES"); do
