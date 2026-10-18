@@ -36,7 +36,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: v8-rig-${{ matrix.os }}-${{ matrix.v8_ref }}
+  group: v8-rig
   cancel-in-progress: false
 
 jobs:

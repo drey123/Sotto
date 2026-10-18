@@ -44,14 +44,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - name: KVM probe (fail fast with a clear marker if absent)
+      - name: KVM probe + access fix (fail fast only if truly absent)
         run: |
-          if [ -e /dev/kvm ] && [ -w /dev/kvm ]; then
-            echo "KVM-PRESENT $(ls -la /dev/kvm)"
-          else
+          if [ ! -e /dev/kvm ]; then
             echo "KVM-ABSENT — hosted Android install is not viable without KVM"
-            ls -la /dev/kvm 2>&1 || true
-            exit 78  # skip-style failure: configuration error, recorded honestly
+            exit 78  # configuration error, recorded honestly
+          fi
+          # Device exists (root:kvm, mode 660). Grant the runner user access.
+          if [ ! -w /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm || sudo chown "$(id -un)" /dev/kvm || true
+          fi
+          sleep 1
+          if [ -w /dev/kvm ]; then
+            echo "KVM-PRESENT-AND-WRITABLE $(ls -la /dev/kvm)"
+          else
+            echo "KVM-PRESENT-BUT-UNACCESSIBLE (perms fix failed) $(ls -la /dev/kvm)"
+            exit 78
           fi
 
       - name: Free runner disk (emulator + images + artifact staging)
