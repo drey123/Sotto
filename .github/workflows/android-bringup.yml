@@ -1,12 +1,14 @@
 # android-bringup.yml — hosted Android virtual-device bring-up + browser install (generic).
 #
 # Boots an Android 11 (API 30, google_apis x86_64) emulator with KVM acceleration on a
-# hosted Linux runner (4 vCPU / 16 GB RAM), installs a Chromium for Android snapshot
-# build (ChromePublic.apk from the public chromium-browser-snapshots bucket), verifies
-# the install, and publishes:
-#   1. the post-install AVD (userdata + dexopt caches) as an artifact — any environment
-#      can then boot the pre-installed device locally (software emulation is fine for a
-#      warm boot; the expensive APK parse/install step is already done), and
+# hosted Linux runner, installs a Chromium for Android snapshot build (ChromePublic.apk
+# from the public chromium-browser-snapshots bucket), verifies the install, and publishes:
+#   1. the post-install AVD (userdata + dexopt caches + a saved quickboot "ready"
+#      snapshot, fleet-container-matched config: 2 vCPU / 2048 MB) as an artifact —
+#      modest-hardware environments load the snapshot directly (emulator -snapshot
+#      ready) instead of repeating the multi-minute cold boot, then run their own
+#      workloads privately; the data-only warm-boot lane (fresh overlay over the
+#      shipped images) also remains available, and
 #   2. boot/install logs as evidence.
 #
 # Triggers: push-triggered on edits to this file; manual dispatch supported.
@@ -114,16 +116,19 @@ jobs:
           fi
           avdmanager list avd | head -12
 
-      - name: Boot emulator (KVM, headless, software GL)
+      - name: Boot emulator (KVM, headless, software GL, fleet-matched config)
         run: |
           set -euo pipefail
+          # v9: -cores 2 / -memory 2048 match the fleet container class (2 vCPU / 4 GB)
+          # so the saved quickboot snapshot is loadable there; -no-snapshot-save keeps
+          # auto-save off while allowing explicit `avd snapshot save` (v9 new step).
           nohup "$ANDROID_HOME/emulator/emulator" \
             -avd "${{ env.AVD_NAME }}" \
             -accel on \
-            -cores 4 \
+            -cores 2 \
             -gpu swiftshader_indirect \
-            -no-window -no-audio -no-boot-anim -no-snapshot \
-            -memory 4096 \
+            -no-window -no-audio -no-boot-anim -no-snapshot-save \
+            -memory 2048 \
             > /tmp/emulator.log 2>&1 &
           echo "EMULATOR-LAUNCHED $(date -u +%FT%TZ)"
           sleep 10
@@ -245,27 +250,29 @@ jobs:
           done
           pgrep -f "emulator.*${{ env.AVD_NAME }}" && { echo "EMULATOR-STILL-RUNNING"; pkill -f "emulator.*${{ env.AVD_NAME }}" || true; sleep 5; } || true
 
-      - name: Compact userdata to qcow2 (smaller artifact + compact local footprint)
+      - name: Save ready snapshot (post-install state, fleet-config-matched)
+        run: |
+          set -euo pipefail
+          # v9: persist the booted+installed VM state as a named quickboot snapshot.
+          # Consumers with modest hardware load it directly (-snapshot ready) instead
+          # of repeating the multi-minute cold boot.
+          adb emu avd snapshot save ready
+          sleep 3
+          AVD_DIR="$HOME/.android/avd/${{ env.AVD_NAME }}.avd"
+          ls -la "$AVD_DIR/snapshots/ready/" 2>/dev/null || true
+          [ -f "$AVD_DIR/snapshots/ready/ram.bin" ] || { echo "SNAPSHOT-SAVE-FAILED (no ram.bin)"; exit 1; }
+          echo "SNAPSHOT-READY-SAVED $(du -sh "$AVD_DIR/snapshots/ready" | cut -f1)"
+
+      - name: Report AVD image state (no conversion — snapshot requires original images)
         run: |
           set -euo pipefail
           AVD_DIR="$HOME/.android/avd/${{ env.AVD_NAME }}.avd"
-          # v8: ubuntu-latest runners do NOT ship qemu-utils (v7 failed here, exit 127).
-          # Resolve qemu-img: prefer the emulator package's bundled binary; fall back
-          # to an apt install of qemu-utils if the bundled one is absent.
-          QEMU_IMG="$ANDROID_HOME/emulator/qemu-img"
-          if [ ! -x "$QEMU_IMG" ]; then
-            echo "bundled qemu-img not found — installing qemu-utils"
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq qemu-utils
-            QEMU_IMG="$(command -v qemu-img)"
-          fi
-          [ -n "$QEMU_IMG" ] && [ -x "$QEMU_IMG" ] || { echo "qemu-img unavailable"; exit 1; }
-          echo "QEMU_IMG=$QEMU_IMG"
-          "$QEMU_IMG" --version | head -1
-          "$QEMU_IMG" convert -O qcow2 "$AVD_DIR/userdata-qemu.img" "$AVD_DIR/userdata-qemu.qcow2"
-          mv "$AVD_DIR/userdata-qemu.qcow2" "$AVD_DIR/userdata-qemu.img"
-          "$QEMU_IMG" info "$AVD_DIR/userdata-qemu.img"
-          ls -la "$AVD_DIR/" | head -10
+          # v9: the v8 compaction (base -> qcow2, mv over) silently broke the overlay
+          # chain (overlay declares raw backing). With a saved snapshot the images must
+          # ship UNMODIFIED, so this step only reports sizes.
+          du -sh "$AVD_DIR" || true
+          ls -la "$AVD_DIR/" | head -14
+          "$ANDROID_HOME/emulator/qemu-img" info "$AVD_DIR/userdata-qemu.img.qcow2" 2>/dev/null | grep -E "virtual|disk size|backing" || true
 
       - name: Stage artifacts
         run: |
