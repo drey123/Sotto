@@ -119,14 +119,21 @@ jobs:
           set -euo pipefail
           nohup "$ANDROID_HOME/emulator/emulator" \
             -avd "${{ env.AVD_NAME }}" \
-            -accelerator on \
+            -accel on \
             -cores 4 \
             -gpu swiftshader_indirect \
             -no-window -no-audio -no-boot-anim -no-snapshot \
             -memory 4096 \
             > /tmp/emulator.log 2>&1 &
           echo "EMULATOR-LAUNCHED $(date -u +%FT%TZ)"
-          sleep 30
+          sleep 10
+          if ! pgrep -f "emulator.*${{ env.AVD_NAME }}" > /dev/null; then
+            echo "EMULATOR-DIED-AT-LAUNCH - full log:"
+            cat /tmp/emulator.log 2>/dev/null || true
+            exit 1
+          fi
+          echo "EMULATOR-ALIVE-10s"
+          sleep 20
           echo "--- emulator.log after 30s ---"
           tail -20 /tmp/emulator.log 2>/dev/null || true
 
