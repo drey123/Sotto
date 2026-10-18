@@ -40,7 +40,7 @@ env:
   IMG_ABI: x86_64
   IMG_TAG: google_apis
   AVD_NAME: rig
-  CHROME_SNAPSHOT_REV: '1700587'   # chromium-browser-snapshots/Android rev (156.0.8066.0)
+  CHROME_SNAPSHOT_REV: '1721525'   # chromium-browser-snapshots/Android_Arm64 rev (trunk 4ea1cdf4; arm64-v8a build)
   RAM_MB: '8192'                   # guest RAM (high-RAM device class)
   BATTERY_MODES: 'idle,loop,navonly'  # v2: full matrix — background-churn control + stress + churn-control
   CYCLES: '60'
@@ -194,10 +194,10 @@ jobs:
           echo "animator_duration_scale=$CUR"
           [ "$CUR" = "1.0" ] || timeout 15 adb shell settings put global animator_duration_scale 1 || true
 
-      - name: Fetch Chromium for Android snapshot (chrome-android.zip -> APK)
+      - name: Fetch Chromium for Android snapshot (arm64 lineage)
         run: |
           set -euo pipefail
-          URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/Android/${{ env.CHROME_SNAPSHOT_REV }}/chrome-android.zip"
+          URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/Android_Arm64/${{ env.CHROME_SNAPSHOT_REV }}/chrome-android.zip"
           echo "FETCH $URL"
           curl -fSLo /tmp/chrome-android.zip "$URL"
           ls -la /tmp/chrome-android.zip
@@ -229,12 +229,17 @@ jobs:
           timeout 20 adb shell dumpsys package ${{ env.PACKAGE }} | grep -E "versionName|versionCode|firstInstallTime|lastUpdateTime" | head -6 \
             || { echo "dumpsys grep empty — installed chrome-family packages:"; timeout 20 adb shell pm list packages | grep -i chrom || true; exit 1; }
           timeout 20 adb shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER ${{ env.PACKAGE }} | tail -2
+          # installed-ABI ground truth (the 32-bit-arm snapshot build crash-loops under the
+          # legacy translator on this image class; arm64 runs on the primary translation path)
+          timeout 20 adb shell "pm path ${{ env.PACKAGE }} | head -1" || true
+          timeout 20 adb shell "ls -la /data/app/*/${{ env.PACKAGE }}*/lib/ 2>/dev/null || ls /data/app/*/ 2>/dev/null | head -5" || true
+          timeout 20 adb shell getprop ro.product.cpu.abilist || true
 
       - name: Start logcat capture + serve stress page + adb reverse
         run: |
           set -euo pipefail
           # full logcat capture from this point on (background, threadtime, all buffers)
-          nohup adb logcat -v threadtime > /tmp/logcat_full.log 2>&1 &
+          nohup adb logcat -v threadtime >> /tmp/logcat_full.log 2>&1 &
           echo "LOGCAT-CAPTURE-STARTED $(date -u +%FT%TZ)"
           # serve the stress dir on a fixed high port
           PORT=8791
@@ -250,7 +255,7 @@ jobs:
           set -uo pipefail
           PAGE_URL="http://localhost:${{ env.BATTERY_PORT }}/${{ env.PAGE }}?mode=idle&fresh=1"
           # optional: command-line file (honored by continuous builds; harmless if ignored)
-          timeout 15 adb shell "printf 'chrome --no-first-run --no-default-browser-check --disable-sync --disable-component-update --disable-background-networking\n' > /data/local/tmp/chrome-command-line" || true
+          timeout 15 adb shell "printf 'chrome --no-first-run --no-default-browser-check --disable-sync --disable-component-update --disable-background-networking --enable-logging=stderr --v=0\n' > /data/local/tmp/chrome-command-line" || true
           timeout 15 adb shell chmod 644 /data/local/tmp/chrome-command-line || true
 
           echo "=== FIRST LAUNCH ==="
@@ -353,7 +358,7 @@ jobs:
           set -uo pipefail
           echo "=== FULL CRASH BUFFER ==="
           timeout 30 adb logcat -d -b crash > /tmp/battery/crash_buffer_full.txt 2>&1 || true
-          cat /tmp/battery/crash_buffer_full.txt | head -50
+          head -50 /tmp/battery/crash_buffer_full.txt 2>/dev/null || true
           echo ""
           echo "=== SIGNATURE SWEEP (across full logcat) ==="
           grep -aE "Fatal signal|SIGSEGV|SIGABRT|SIGBUS|SIGILL|privileged_process|VizCompositor|GPU process|tombstoned|cr_ChildProcessConn|ForceCrash|debuggerd" /tmp/logcat_full.log > /tmp/battery/signature_hits.txt || true
