@@ -1,0 +1,407 @@
+# android-battery.yml — hosted Android emulator browser stress battery (generic).
+#
+# Boots an Android 11 (API 30, google_apis x86_64) emulator with KVM on a hosted
+# Linux runner, with 8 GB guest RAM (high-RAM device class so RAM-gated mobile
+# platform features are active), installs a Chromium for Android snapshot build
+# (ChromePublic.apk from the public chromium-browser-snapshots bucket), dismisses
+# the browser first-run flow, then runs a background/foreground churn battery
+# against a locally served stress page (stress/navloop-stress.html) while
+# capturing full logcat, the crash buffer, and a generic crash-signature sweep.
+#
+# BATTERY_MODES controls which page modes run:
+#   idle — page with no navigation loop + full host background/foreground churn
+#          (background-churn control; also the infra-validation mode)
+#   loop — navigation loop + full host churn (the stress mode)
+#   navonly — navigation loop without host backgrounding (churn control)
+#
+# Triggers: push on this file or stress/**; manual dispatch supported.
+
+name: android-battery
+
+on:
+  workflow_dispatch:
+    inputs:
+      battery_modes:
+        description: 'Comma-separated page modes (idle,loop,navonly)'
+        default: 'idle'
+      cycles:
+        description: 'Background/foreground cycles per session'
+        default: '30'
+  push:
+    paths:
+      - '.github/workflows/android-battery.yml'
+      - 'stress/**'
+
+permissions:
+  contents: read
+
+env:
+  API_LEVEL: '30'
+  IMG_ABI: x86_64
+  IMG_TAG: google_apis
+  AVD_NAME: rig
+  CHROME_SNAPSHOT_REV: '1700587'   # chromium-browser-snapshots/Android rev (156.0.8066.0)
+  RAM_MB: '8192'                   # guest RAM (high-RAM device class)
+  BATTERY_MODES: 'idle'            # v1: infra validation + background-churn control only
+  CYCLES: '30'
+  DWELL_MS: '700'
+  BG_HOLD_S: '2'
+  FG_DWELL_S: '3'
+  PACKAGE: org.chromium.chrome
+  ACTIVITY: com.google.android.apps.chrome.Main
+  PAGE: navloop-stress.html
+
+concurrency:
+  group: android-battery
+  cancel-in-progress: false
+
+jobs:
+  battery:
+    name: Android browser stress battery (KVM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: KVM probe + access fix (fail fast only if truly absent)
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "KVM-ABSENT — hosted Android battery is not viable without KVM"
+            exit 78
+          fi
+          if [ ! -w /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm || sudo chown "$(id -un)" /dev/kvm || true
+          fi
+          sleep 1
+          if [ -w /dev/kvm ]; then
+            echo "KVM-PRESENT-AND-WRITABLE $(ls -la /dev/kvm)"
+          else
+            echo "KVM-PRESENT-BUT-UNACCESSIBLE (perms fix failed) $(ls -la /dev/kvm)"
+            exit 78
+          fi
+
+      - name: Free runner disk (emulator + images + artifact staging)
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+                      /usr/share/swift /usr/share/miniconda
+          df -h /
+          echo "JOB-START $(date -u +%FT%TZ)"
+
+      - name: Install Android SDK (cmdline-tools + platform-tools + emulator + system image)
+        run: |
+          set -euo pipefail
+          SDK="$HOME/android-sdk"
+          mkdir -p "$SDK/cmdline-tools"
+          curl -fsSLo /tmp/clt.zip \
+            https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q /tmp/clt.zip -d "$SDK/cmdline-tools"
+          mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"
+          export ANDROID_HOME="$SDK"
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          export PATH="$SDK/cmdline-tools/latest/bin:$PATH"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_AVD_HOME=$HOME/.android/avd" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/.android/avd"
+          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+          java -version 2>&1 | head -1
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install \
+            "platform-tools" \
+            "emulator" \
+            "system-images;android-${{ env.API_LEVEL }};${{ env.IMG_TAG }};${{ env.IMG_ABI }}" \
+            > /tmp/sdkmanager.log 2>&1
+          tail -5 /tmp/sdkmanager.log
+          ls "$SDK/system-images/android-${{ env.API_LEVEL }}/${{ env.IMG_TAG }}/${{ env.IMG_ABI }}/"
+
+      - name: Create AVD (8G RAM; 2G data partition for fast first-boot format)
+        run: |
+          set -euo pipefail
+          echo "no" | avdmanager create avd -n "${{ env.AVD_NAME }}" \
+            -k "system-images;android-${{ env.API_LEVEL }};${{ env.IMG_TAG }};${{ env.IMG_ABI }}" \
+            -d pixel_5
+          CFG="$HOME/.android/avd/${{ env.AVD_NAME }}.avd/config.ini"
+          if [ -f "$CFG" ]; then
+            sed -i '/^disk.dataPartition.size/d' "$CFG"
+            sed -i '/^hw.ramSize/d' "$CFG"
+            printf 'disk.dataPartition.size = 2G\nhw.ramSize = 8192\n' >> "$CFG"
+            echo "--- AVD config (key rows) ---"
+            grep -E "dataPartition|ramSize|image.sysdir|hw.cpu" "$CFG" || true
+          fi
+          avdmanager list avd | head -12
+
+      - name: Boot emulator (KVM, headless, software GL, 8G RAM)
+        run: |
+          set -euo pipefail
+          nohup "$ANDROID_HOME/emulator/emulator" \
+            -avd "${{ env.AVD_NAME }}" \
+            -accel on \
+            -cores 4 \
+            -gpu swiftshader_indirect \
+            -no-window -no-audio -no-boot-anim -no-snapshot \
+            -memory ${{ env.RAM_MB }} \
+            > /tmp/emulator.log 2>&1 &
+          echo "EMULATOR-LAUNCHED $(date -u +%FT%TZ)"
+          sleep 10
+          if ! pgrep -f "emulator.*${{ env.AVD_NAME }}" > /dev/null; then
+            echo "EMULATOR-DIED-AT-LAUNCH - full log:"
+            cat /tmp/emulator.log 2>/dev/null || true
+            exit 1
+          fi
+          echo "EMULATOR-ALIVE-10s"
+
+      - name: Wait for full boot (sys.boot_completed=1)
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 240); do
+            STATE=$(timeout 10 adb get-state 2>/dev/null | tr -d '\r' || true)
+            if [ "$STATE" = "device" ]; then
+              BOOT=$(timeout 15 adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+              if [ "$BOOT" = "1" ]; then
+                echo "BOOT-COMPLETED $(date -u +%FT%TZ) after ~$((i*7))s of polling"
+                break
+              fi
+            fi
+            if [ $((i % 12)) -eq 0 ]; then
+              echo "poll ${i}: state=${STATE:-none} | emulator.log tail:"
+              tail -4 /tmp/emulator.log 2>/dev/null || true
+            fi
+            sleep 7
+            if [ "$i" = "240" ]; then
+              echo "BOOT-TIMEOUT - emulator log tail:"
+              tail -60 /tmp/emulator.log 2>/dev/null || true
+              exit 1
+            fi
+          done
+          timeout 20 adb devices -l
+
+      - name: adb root, identity, RAM verification
+        run: |
+          set -euo pipefail
+          adb root
+          sleep 3
+          adb wait-for-device
+          timeout 15 adb shell id
+          timeout 15 adb shell getprop ro.build.version.release
+          timeout 15 adb shell getprop ro.product.cpu.abi
+          MEM_KB=$(timeout 15 adb shell cat /proc/meminfo 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r')
+          echo "MEMTOTAL_KB=$MEM_KB"
+          # keep screen on and animations at scale 1 (accessibility reduce-animations must be OFF)
+          timeout 15 adb shell svc power stayon true || true
+          CUR=$(timeout 15 adb shell settings get global animator_duration_scale 2>/dev/null | tr -d '\r' || true)
+          echo "animator_duration_scale=$CUR"
+          [ "$CUR" = "1.0" ] || timeout 15 adb shell settings put global animator_duration_scale 1 || true
+
+      - name: Fetch Chromium for Android snapshot (chrome-android.zip -> APK)
+        run: |
+          set -euo pipefail
+          URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/Android/${{ env.CHROME_SNAPSHOT_REV }}/chrome-android.zip"
+          echo "FETCH $URL"
+          curl -fSLo /tmp/chrome-android.zip "$URL"
+          ls -la /tmp/chrome-android.zip
+          sha256sum /tmp/chrome-android.zip
+          unzip -o -q /tmp/chrome-android.zip -d /tmp/chrome-android
+          APK="$(find /tmp/chrome-android -name 'ChromePublic.apk' -type f | head -1)"
+          if [ -z "$APK" ]; then
+            echo "ChromePublic.apk not found — zip contents:"
+            find /tmp/chrome-android -name '*.apk' -type f
+            APK="$(find /tmp/chrome-android -name '*.apk' -type f | head -1)"
+            [ -n "$APK" ] || { echo "NO APK inside chrome-android.zip"; exit 1; }
+          fi
+          echo "APK found: $APK"
+          cp -v "$APK" /tmp/ChromePublic.apk
+          ls -la /tmp/ChromePublic.apk
+          sha256sum /tmp/ChromePublic.apk
+
+      - name: Install ChromePublic.apk (KVM budget; generous timeout)
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          adb install -r -g /tmp/ChromePublic.apk 2>&1 | tee /tmp/install.log
+          grep -q "Success" /tmp/install.log || { echo "INSTALL-FAILED"; exit 1; }
+          echo "INSTALL-SUCCESS $(date -u +%FT%TZ)"
+
+      - name: Verify install (package + version + activity resolve)
+        run: |
+          set -euo pipefail
+          timeout 20 adb shell dumpsys package ${{ env.PACKAGE }} | grep -E "versionName|versionCode|firstInstallTime|lastUpdateTime" | head -6 \
+            || { echo "dumpsys grep empty — installed chrome-family packages:"; timeout 20 adb shell pm list packages | grep -i chrom || true; exit 1; }
+          timeout 20 adb shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER ${{ env.PACKAGE }} | tail -2
+
+      - name: Start logcat capture + serve stress page + adb reverse
+        run: |
+          set -euo pipefail
+          # full logcat capture from this point on (background, threadtime, all buffers)
+          nohup adb logcat -v threadtime > /tmp/logcat_full.log 2>&1 &
+          echo "LOGCAT-CAPTURE-STARTED $(date -u +%FT%TZ)"
+          # serve the stress dir on a fixed high port
+          PORT=8791
+          nohup python3 -m http.server "$PORT" --directory "$GITHUB_WORKSPACE/stress" > /tmp/httpserver.log 2>&1 &
+          sleep 2
+          curl -s -o /dev/null -w "http-server-selftest=%{http_code}\n" "http://localhost:$PORT/${{ env.PAGE }}"
+          timeout 15 adb reverse "tcp:$PORT" "tcp:$PORT" && echo "ADB-REVERSE-OK port $PORT"
+          echo "BATTERY_PORT=$PORT" >> "$GITHUB_ENV"
+
+      - name: Chrome first-launch diagnostics + first-run dismissal
+        timeout-minutes: 8
+        run: |
+          set -uo pipefail
+          PAGE_URL="http://localhost:${{ env.BATTERY_PORT }}/${{ env.PAGE }}?mode=idle&fresh=1"
+          # optional: command-line file (honored by continuous builds; harmless if ignored)
+          timeout 15 adb shell "printf 'chrome --no-first-run --no-default-browser-check --disable-sync --disable-component-update --disable-background-networking\n' > /data/local/tmp/chrome-command-line" || true
+          timeout 15 adb shell chmod 644 /data/local/tmp/chrome-command-line || true
+
+          echo "=== FIRST LAUNCH ==="
+          timeout 25 adb shell am start -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "$PAGE_URL" 2>&1 | tee /tmp/am_start.log
+          sleep 12
+
+          # first-run dismissal loop: dump UI, find primary button, tap, repeat
+          for round in 1 2 3 4 5; do
+            timeout 20 adb shell uiautomator dump /sdcard/ui_dump.xml >/dev/null 2>&1 || true
+            timeout 20 adb pull /sdcard/ui_dump.xml /tmp/ui_dump.xml >/dev/null 2>&1 || true
+            if [ ! -s /tmp/ui_dump.xml ]; then echo "ui dump round ${round}: EMPTY"; break; fi
+            BTN=$(python3 "$GITHUB_WORKSPACE/scripts/find_fre_button.py" /tmp/ui_dump.xml 2>/dev/null || true)
+            if [ -z "$BTN" ]; then
+              echo "round ${round}: no first-run button found in UI dump"
+              break
+            fi
+            echo "round ${round}: tapping first-run button at $BTN"
+            timeout 15 adb shell input tap $BTN
+            sleep 3
+          done
+
+          sleep 5
+          echo "=== POST-DISMISSAL STATE ==="
+          timeout 20 adb shell "dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity' | head -3" || true
+          timeout 20 adb shell screencap -p /sdcard/launch_state.png || true
+          timeout 20 adb pull /sdcard/launch_state.png /tmp/launch_state.png >/dev/null 2>&1 || true
+          echo "--- console lines so far ---"
+          grep -a "NAVSTRESS" /tmp/logcat_full.log | tail -10 || echo "NO-NAVSTRESS-CONSOLE-LINES-YET"
+          echo "--- chrome processes ---"
+          timeout 20 adb shell ps -A 2>/dev/null | grep -E "chrom" | head -8 || echo "NO-CHROME-PROCESS"
+
+      - name: Run battery sessions (mode matrix)
+        timeout-minutes: 45
+        run: |
+          set -uo pipefail
+          MODES="${{ env.BATTERY_MODES }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.battery_modes }}" ]; then
+            MODES="${{ github.event.inputs.battery_modes }}"
+          fi
+          CYCLES="${{ env.CYCLES }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.cycles }}" ]; then
+            CYCLES="${{ github.event.inputs.cycles }}"
+          fi
+          echo "BATTERY: modes=[$MODES] cycles=$CYCLES dwell=${{ env.DWELL_MS }}ms bg_hold=${{ env.BG_HOLD_S }}s fg_dwell=${{ env.FG_DWELL_S }}s"
+          mkdir -p /tmp/battery
+
+          for MODE in $(echo "$MODES" | tr ',' ' '); do
+            SESS="mode_${MODE}_$(date -u +%H%M%S)"
+            echo "=== SESSION $SESS START $(date -u +%FT%TZ) ==="
+            # session-scoped logcat marker
+            echo "=== SESSION $SESS START ===" >> /tmp/logcat_full.log
+
+            # fresh launch at the mode URL
+            URL="http://localhost:${{ env.BATTERY_PORT }}/${{ env.PAGE }}?mode=${MODE}&fresh=1&dwell=${{ env.DWELL_MS }}"
+            timeout 25 adb shell am start -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "$URL" 2>&1 | tail -2
+            sleep 5
+
+            # background/foreground churn loop
+            for c in $(seq 1 "$CYCLES"); do
+              echo "cycle $c/ $CYCLES [$(date -u +%T)]"
+              if [ "$MODE" != "navonly" ]; then
+                sleep "${{ env.FG_DWELL_S }}"
+                timeout 15 adb shell input keyevent KEYCODE_HOME || true
+                sleep "${{ env.BG_HOLD_S }}"
+                # relaunch via launcher intent (resumes the existing tab; the page's
+                # visibility handler re-arms its loop)
+                timeout 25 adb shell monkey -p ${{ env.PACKAGE }} -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+              else
+                sleep $(( ${{ env.FG_DWELL_S }} + ${{ env.BG_HOLD_S }} ))
+              fi
+              ALIVE=$(timeout 15 adb shell pidof ${{ env.PACKAGE }} 2>/dev/null | tr -d '\r' || true)
+              GPUALIVE=$(timeout 15 adb shell ps -A 2>/dev/null | grep -c "privileged_process" || true)
+              if [ -z "$ALIVE" ]; then
+                echo "CYCLE $c: BROWSER-PROCESS-GONE (pidof empty) [$(date -u +%T)]"
+                echo "=== SESSION $SESS BROWSER-GONE cycle $c ===" >> /tmp/logcat_full.log
+                # relaunch and continue; the session keeps its identity in the logcat
+                timeout 25 adb shell monkey -p ${{ env.PACKAGE }} -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+                sleep 3
+              else
+                echo "CYCLE $c: browser pid=$ALIVE gpu_procs=${GPUALIVE:-0} [$(date -u +%T)]"
+              fi
+            done
+
+            # settle + per-session captures
+            sleep 5
+            echo "=== SESSION $SESS END ===" >> /tmp/logcat_full.log
+            timeout 20 adb shell screencap -p /sdcard/${SESS}_end.png || true
+            timeout 20 adb pull /sdcard/${SESS}_end.png /tmp/battery/ >/dev/null 2>&1 || true
+            # snapshot the logcat-so-far for this session
+            awk "/=== SESSION $SESS START ===/,/=== SESSION $SESS END ===/" /tmp/logcat_full.log > /tmp/battery/${SESS}_logcat.txt || true
+            timeout 20 adb logcat -d -b crash > /tmp/battery/${SESS}_crash.txt 2>&1 || true
+            # session console lines
+            grep -a "NAVSTRESS" /tmp/battery/${SESS}_logcat.txt > /tmp/battery/${SESS}_console.txt || true
+            echo "=== SESSION $SESS END $(date -u +%FT%TZ) — console lines: $(wc -l < /tmp/battery/${SESS}_console.txt 2>/dev/null || echo 0) ==="
+          done
+
+      - name: Crash-buffer + signature sweep (all sessions)
+        if: always()
+        run: |
+          set -uo pipefail
+          echo "=== FULL CRASH BUFFER ==="
+          timeout 30 adb logcat -d -b crash > /tmp/battery/crash_buffer_full.txt 2>&1 || true
+          cat /tmp/battery/crash_buffer_full.txt | head -50
+          echo ""
+          echo "=== SIGNATURE SWEEP (across full logcat) ==="
+          grep -aE "Fatal signal|SIGSEGV|SIGABRT|SIGBUS|SIGILL|privileged_process|VizCompositor|GPU process|tombstoned|cr_ChildProcessConn|ForceCrash|debuggerd" /tmp/logcat_full.log > /tmp/battery/signature_hits.txt || true
+          wc -l /tmp/battery/signature_hits.txt
+          head -60 /tmp/battery/signature_hits.txt || true
+          echo ""
+          echo "=== SESSION SUMMARY ==="
+          for f in /tmp/battery/mode_*_console.txt; do
+            [ -e "$f" ] || continue
+            echo "--- $f: $(wc -l < "$f") console lines"
+            head -5 "$f"
+            tail -5 "$f"
+          done
+          echo ""
+          echo "=== DEVICE/CHROME IDENTITY (report-back) ==="
+          { timeout 15 adb shell getprop ro.build.version.release || true; \
+            timeout 20 adb shell dumpsys package ${{ env.PACKAGE }} | grep -E "versionName|versionCode" | head -2 || true; \
+            timeout 15 adb shell cat /proc/meminfo | head -1 || true; } | tee /tmp/battery/identity.txt
+
+      - name: Clean shutdown
+        if: always()
+        run: |
+          adb emu kill || true
+          for i in $(seq 1 30); do
+            pgrep -f "emulator.*${{ env.AVD_NAME }}" > /dev/null || { echo "EMULATOR-EXITED cleanly"; break; }
+            sleep 2
+          done
+          pgrep -f "emulator.*${{ env.AVD_NAME }}" && pkill -f "emulator.*${{ env.AVD_NAME }}" || true
+
+      - name: Stage artifacts
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/battery-logs"
+          cp -a /tmp/battery/. "$GITHUB_WORKSPACE/battery-logs/" 2>/dev/null || true
+          cp /tmp/logcat_full.log "$GITHUB_WORKSPACE/battery-logs/logcat_full.log" 2>/dev/null || true
+          cp /tmp/emulator.log /tmp/install.log /tmp/am_start.log /tmp/httpserver.log "$GITHUB_WORKSPACE/battery-logs/" 2>/dev/null || true
+          cp /tmp/launch_state.png "$GITHUB_WORKSPACE/battery-logs/" 2>/dev/null || true
+          cp /tmp/ui_dump.xml "$GITHUB_WORKSPACE/battery-logs/" 2>/dev/null || true
+          [ -f /tmp/ChromePublic.apk ] && sha256sum /tmp/ChromePublic.apk > "$GITHUB_WORKSPACE/battery-logs/apk_sha256.txt"
+          du -sh "$GITHUB_WORKSPACE/battery-logs" || true
+          df -h / || true
+
+      - name: Upload battery evidence (retention 14 days)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-battery-logs
+          path: battery-logs/
+          retention-days: 14
+          if-no-files-found: warn

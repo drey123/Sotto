@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<!--
+  navloop-stress.html — generic browser navigation/visibility stress page
+  for Android emulator CI batteries.
+
+  Purpose: drive a controllable navigation + background/foreground churn
+  workload against a mobile browser so that CI can capture stability
+  evidence (logcat, crash buffers) under load.
+
+  Modes (URL params):
+    ?mode=idle   default: page stays put; logs visibility/orientation
+                 transitions only (background churn control)
+    ?mode=loop   navigation loop: location.assign() to a fresh ?i=N URL
+                 every dwell period (cross-document navigations; no
+                 history.replace, no reloads)
+    &dwell=700   ms between navigations (loop mode)
+    &maxnav=2000 hard cap on navigations per tab (safety)
+
+  Every event is console.log'd with the literal prefix "[NAVSTRESS]" so a
+  device session is greppable from adb logcat; the same lines live in the
+  on-page log (ring buffer, last 400 lines) with a COPY button.
+
+  No claims are made about any specific defect; this is load tooling.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>navloop-stress</title>
+<style>
+  html,body{margin:0;padding:0;background:#101418;color:#d8e0e8;font:13px/1.45 monospace}
+  header{padding:10px 12px;background:#1b232c;border-bottom:1px solid #2c3844}
+  h1{font-size:14px;margin:0 0 4px}
+  #stats div{padding:1px 0}
+  #log{padding:8px 12px;white-space:pre-wrap;word-break:break-all}
+  .ln{color:#9fb4c8}
+  #copybar{position:fixed;right:10px;bottom:10px}
+  button{background:#2c3844;color:#d8e0e8;border:1px solid #45566a;padding:8px 12px;font:12px monospace}
+</style>
+</head>
+<body>
+<header>
+  <h1>navloop-stress — <span id="mode">?</span></h1>
+  <div id="stats">
+    <div>navigations: <b id="c_nav">0</b> &nbsp; vis lost: <b id="c_vl">0</b> &nbsp; vis gained: <b id="c_vg">0</b>
+         &nbsp; orientation: <b id="c_or">0</b></div>
+    <div>since nav start: <b id="c_dt">0</b> s &nbsp; next nav in: <b id="c_next">—</b> s</div>
+  </div>
+</header>
+<div id="log" class="ln"></div>
+<div id="copybar"><button id="copy">copy session log</button></div>
+<script>
+(function () {
+  'use strict';
+
+  // ---------- params ----------
+  var q = {};
+  location.search.substring(1).split('&').forEach(function (kv) {
+    if (!kv) { return; }
+    var i = kv.indexOf('=');
+    q[i < 0 ? kv : kv.substring(0, i)] = i < 0 ? '' : decodeURIComponent(kv.substring(i + 1));
+  });
+
+  var MODE    = q.mode || 'idle';
+  var DWELL   = Math.max(120, parseInt(q.dwell || '700', 10) || 700);
+  var MAXNAV  = Math.min(20000, parseInt(q.maxnav || '2000', 10) || 2000);
+
+  // ---------- session log ----------
+  var LOG = [];
+  function out (msg) {
+    var line = '[' + new Date().toISOString() + '] [NAVSTRESS] ' + msg;
+    try { console.log('[NAVSTRESS] ' + msg); } catch (e) {}
+    LOG.push(line);
+    if (LOG.length > 400) { LOG.shift(); }
+    var el = document.getElementById('log');
+    if (el) { el.textContent = LOG.join('\n'); }
+    return line;
+  }
+  document.getElementById('copy').addEventListener('click', function () {
+    var t = LOG.join('\n');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(function () { out('session log copied'); });
+    } else {
+      out('clipboard unavailable; log follows');
+      out(t);
+    }
+  });
+
+  // ---------- counters ----------
+  // navs is derived from the URL ?i=N param so the count persists across
+  // cross-document navigations (each nav loads a fresh document).
+  var navs = parseInt(q.i || '0', 10) || 0;
+  var vl = 0, vg = 0, ors = 0;
+  var t0 = 0, navTimer = null, stopped = false;
+  try {
+    t0 = parseInt(sessionStorage.getItem('t0') || '0', 10) || 0;
+  } catch (e) {}
+  if (!t0) { t0 = Date.now(); try { sessionStorage.setItem('t0', String(t0)); } catch (e) {} }
+
+  function setStat (id, v) {
+    var el = document.getElementById(id);
+    if (el) { el.textContent = String(v); }
+  }
+
+  // ---------- visibility / orientation ----------
+  function visEvent () {
+    if (document.visibilityState === 'hidden') {
+      vl++; setStat('c_vl', vl);
+      out('visibility LOST (navs=' + navs + ')');
+    } else {
+      vg++; setStat('c_vg', vg);
+      out('visibility GAINED (navs=' + navs + ')');
+      armLoop();
+    }
+  }
+  document.addEventListener('visibilitychange', visEvent);
+  window.addEventListener('orientationchange', function () {
+    ors++; setStat('c_or', ors);
+    out('orientation change #' + ors + ' angle=' + (window.orientation !== undefined ? window.orientation : '?'));
+  });
+  window.addEventListener('pagehide', function () { out('pagehide (navs=' + navs + ')'); });
+  window.addEventListener('error', function (e) { out('js error: ' + (e.message || '?')); });
+
+  // ---------- navigation loop ----------
+  function nextUrl () {
+    // query-parameter change => cross-document navigation; never replace(), never reload
+    var params = [];
+    location.search.substring(1).split('&').forEach(function (kv) {
+      if (kv && kv.indexOf('i=') !== 0) { params.push(kv); }
+    });
+    params.unshift('i=' + (navs + 1));
+    return location.pathname + '?' + params.join('&');
+  }
+  function nav () {
+    if (stopped) { return; }
+    if (document.visibilityState === 'hidden') { return; } // re-armed on visibility gain
+    if (navs >= MAXNAV) { out('maxnav reached (' + MAXNAV + '); stopping'); stopped = true; return; }
+    navs++; setStat('c_nav', navs);
+    var u = nextUrl();
+    out('nav #' + navs + ' -> ' + u);
+    location.assign(u);
+  }
+  function armLoop () {
+    if (MODE !== 'loop' || stopped) { return; }
+    if (navTimer) { clearTimeout(navTimer); }
+    var elapsed = Date.now() - t0;
+    var wait = Math.max(0, DWELL - (elapsed % DWELL));
+    setStat('c_next', (wait / 1000).toFixed(1));
+    navTimer = setTimeout(nav, wait);
+  }
+
+  // ---------- boot ----------
+  document.getElementById('mode').textContent = MODE;
+  setStat('c_nav', navs);
+  out('session start mode=' + MODE + ' dwell=' + DWELL + ' maxnav=' + MAXNAV + ' i=' + navs +
+      ' ua="' + navigator.userAgent.slice(0, 80) + '" dpr=' + (window.devicePixelRatio || '?') +
+      ' vw=' + window.innerWidth + 'x' + window.innerHeight);
+  if (navigator.deviceMemory !== undefined) { out('deviceMemory (approx): ' + navigator.deviceMemory); }
+  if (MODE === 'loop') {
+    setInterval(function () { setStat('c_dt', ((Date.now() - t0) / 1000).toFixed(0)); }, 1000);
+    armLoop();
+  } else {
+    out('idle mode: no navigation loop; logging visibility only');
+  }
+  if (q.fresh === '1') { out('fresh session requested'); }
+})();
+</script>
+</body>
+</html>
