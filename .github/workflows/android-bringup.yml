@@ -74,7 +74,7 @@ jobs:
           set -euo pipefail
           SDK="$HOME/android-sdk"
           mkdir -p "$SDK/cmdline-tools"
-          curl -sSLo /tmp/clt.zip \
+          curl -fsSLo /tmp/clt.zip \
             https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           unzip -q /tmp/clt.zip -d "$SDK/cmdline-tools"
           mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"
@@ -186,12 +186,20 @@ jobs:
           adb shell getprop ro.product.cpu.abi
           adb shell cat /proc/meminfo | head -2
 
-      - name: Fetch Chromium for Android snapshot (ChromePublic.apk)
+      - name: Fetch Chromium for Android snapshot (chrome-android.zip -> APK)
         run: |
           set -euo pipefail
-          URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/Android/${{ env.CHROME_SNAPSHOT_REV }}/ChromePublic.apk"
+          URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/Android/${{ env.CHROME_SNAPSHOT_REV }}/chrome-android.zip"
           echo "FETCH $URL"
-          curl -sSLo /tmp/ChromePublic.apk "$URL"
+          curl -fSLo /tmp/chrome-android.zip "$URL"
+          ls -la /tmp/chrome-android.zip
+          sha256sum /tmp/chrome-android.zip
+          unzip -l /tmp/chrome-android.zip | head -15
+          unzip -o -q /tmp/chrome-android.zip -d /tmp/chrome-android
+          APK="$(find /tmp/chrome-android -name '*.apk' -type f | head -1)"
+          [ -n "$APK" ] || { echo "NO APK inside chrome-android.zip"; exit 1; }
+          echo "APK found: $APK"
+          cp -v "$APK" /tmp/ChromePublic.apk
           ls -la /tmp/ChromePublic.apk
           sha256sum /tmp/ChromePublic.apk
 
