@@ -39,7 +39,7 @@ jobs:
   build:
     name: Build d8 rig (${{ matrix.os }} @ ${{ matrix.v8_ref }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 200
+    timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix:
@@ -123,7 +123,7 @@ jobs:
 
       - name: autoninja -C out/rig d8
         working-directory: ${{ github.workspace }}/v8
-        timeout-minutes: 170
+        timeout-minutes: 320
         run: autoninja -C out/rig d8 -j4
 
       - name: Stage rig artifact (natives/snapshot blob only IF PRESENT — static builds embed it)
