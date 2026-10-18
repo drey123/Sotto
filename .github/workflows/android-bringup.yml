@@ -240,16 +240,6 @@ jobs:
           adb shell "dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity' | head -3" || true
           adb shell ps -A | grep -E "chrom" | head -5 || true
 
-      - name: Clean shutdown (flush userdata for artifact)
-        run: |
-          set -euo pipefail
-          adb emu kill || true
-          for i in $(seq 1 30); do
-            pgrep -f "emulator.*${{ env.AVD_NAME }}" > /dev/null || { echo "EMULATOR-EXITED cleanly"; break; }
-            sleep 2
-          done
-          pgrep -f "emulator.*${{ env.AVD_NAME }}" && { echo "EMULATOR-STILL-RUNNING"; pkill -f "emulator.*${{ env.AVD_NAME }}" || true; sleep 5; } || true
-
       - name: Save ready snapshot (post-install state, fleet-config-matched)
         run: |
           set -euo pipefail
@@ -262,6 +252,16 @@ jobs:
           ls -la "$AVD_DIR/snapshots/ready/" 2>/dev/null || true
           [ -f "$AVD_DIR/snapshots/ready/ram.bin" ] || { echo "SNAPSHOT-SAVE-FAILED (no ram.bin)"; exit 1; }
           echo "SNAPSHOT-READY-SAVED $(du -sh "$AVD_DIR/snapshots/ready" | cut -f1)"
+
+      - name: Clean shutdown (flush userdata for artifact)
+        run: |
+          set -euo pipefail
+          adb emu kill || true
+          for i in $(seq 1 30); do
+            pgrep -f "emulator.*${{ env.AVD_NAME }}" > /dev/null || { echo "EMULATOR-EXITED cleanly"; break; }
+            sleep 2
+          done
+          pgrep -f "emulator.*${{ env.AVD_NAME }}" && { echo "EMULATOR-STILL-RUNNING"; pkill -f "emulator.*${{ env.AVD_NAME }}" || true; sleep 5; } || true
 
       - name: Report AVD image state (no conversion — snapshot requires original images)
         run: |
