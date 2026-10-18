@@ -40,7 +40,7 @@ env:
   IMG_ABI: x86_64
   IMG_TAG: google_apis
   AVD_NAME: rig
-  CHROME_SNAPSHOT_REV: '1721525'   # chromium-browser-snapshots/Android_Arm64 rev (trunk 4ea1cdf4; arm64-v8a build)
+  CHROME_SNAPSHOT_REV: '1721527'   # chromium-browser-snapshots/AndroidDesktop_x64 rev (trunk 389904a0; native x86_64 build)
   RAM_MB: '8192'                   # guest RAM (high-RAM device class)
   BATTERY_MODES: 'idle,loop,navonly'  # v2: full matrix — background-churn control + stress + churn-control
   CYCLES: '60'
@@ -194,10 +194,13 @@ jobs:
           echo "animator_duration_scale=$CUR"
           [ "$CUR" = "1.0" ] || timeout 15 adb shell settings put global animator_duration_scale 1 || true
 
-      - name: Fetch Chromium for Android snapshot (arm64 lineage)
+      - name: Fetch Chromium for Android snapshot (x86_64 desktop lineage)
         run: |
           set -euo pipefail
-          URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/Android_Arm64/${{ env.CHROME_SNAPSHOT_REV }}/chrome-android.zip"
+          # native x86_64 Android build — no ARM translation involved; the arm64
+          # snapshot build fails its custom-linker address-space reservation under
+          # the API-30 ndk_translation layer, and the 32-bit arm build crash-loops
+          URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/AndroidDesktop_x64/${{ env.CHROME_SNAPSHOT_REV }}/chrome-android-desktop.zip"
           echo "FETCH $URL"
           curl -fSLo /tmp/chrome-android.zip "$URL"
           ls -la /tmp/chrome-android.zip
