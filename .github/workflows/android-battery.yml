@@ -696,3 +696,5 @@ jobs:
           path: battery-logs/
           retention-days: 14
           if-no-files-found: warn
+
+# re-fire: release control retry after the runner sdk-install broken-pipe failure (run 39342635031)
