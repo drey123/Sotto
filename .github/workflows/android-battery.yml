@@ -1,6 +1,6 @@
 # android-battery.yml — hosted Android emulator browser stress battery (generic; sanitizer-build variant
-# with a startup-diagnostics probe round: environment variants, forensic collection, battery gated on a
-# stable browser).
+# with startup-diagnostics probe round: install/ownership fix ladder, forensic collection, battery gated
+# on a stable browser).
 #
 # Boots an Android 11 (API 30, google_apis x86_64) emulator with KVM on a hosted
 # Linux runner, with 8 GB guest RAM (high-RAM device class so RAM-gated mobile
@@ -237,6 +237,14 @@ jobs:
           # sanitizer runtime can require permissive SELinux on userdebug images
           timeout 15 adb shell setenforce 0 || echo "setenforce 0 unavailable (continuing)"
 
+      - name: Stage APK on device for reinstall variant
+        timeout-minutes: 6
+        run: |
+          set -uo pipefail
+          # keep the APK on the device so a rooted-shell reinstall variant can use it
+          timeout 400 adb push /tmp/ChromePublic.apk /data/local/tmp/ChromePublic.apk || echo "APK-PUSH-FAILED (reinstall variant degraded)"
+          ls -la /tmp/ChromePublic.apk
+
       - name: Verify install (package + version + activity resolve)
         run: |
           set -euo pipefail
@@ -265,125 +273,114 @@ jobs:
           timeout 15 adb reverse "tcp:$PORT" "tcp:$PORT" && echo "ADB-REVERSE-OK port $PORT"
           echo "BATTERY_PORT=$PORT" >> "$GITHUB_ENV"
 
-      - name: Startup probe + environment variants (diagnostics; battery gate)
-        timeout-minutes: 40
+      - name: Startup probe + install/ownership fix ladder (diagnostics; battery gate)
+        timeout-minutes: 45
         run: |
           set -uo pipefail
           PAGE_URL="http://localhost:${{ env.BATTERY_PORT }}/${{ env.PAGE }}?mode=idle&fresh=1"
           mkdir -p /tmp/battery /tmp/forensics
-          # command-line file with the feature override (the sanitizer-lane default configuration)
           FEAT="$(printf '%s' 'VXNlU3Ryb25nUmVmVG9TaGFyZWRJbWFnZUludGVyZmFjZQ==' | base64 -d)"
           write_cmdline() {
             timeout 15 adb shell "printf 'chrome --no-first-run --no-default-browser-check --disable-component-update --enable-logging --v=0 --enable-features=%s\n' '$1' > /data/local/tmp/chrome-command-line" || true
             timeout 15 adb shell chmod 644 /data/local/tmp/chrome-command-line || true
           }
-          clear_wrap() { timeout 15 adb shell setprop wrap.${{ env.PACKAGE }} "" || true; }
-          force_stop() { timeout 20 adb shell am force-stop ${{ env.PACKAGE }} || true; sleep 4; }
-
-          baseline_loglen() { wc -l < /tmp/logcat_full.log; }
-          new_starts_since() { tail -n +$(( $1 + 1 )) /tmp/logcat_full.log | grep -ac "Start proc.*${{ env.PACKAGE }}/.* for top-activity" || true; }
+          force_stop() { timeout 20 adb shell am force-stop ${{ env.PACKAGE }} || true; sleep 5; }
+          count_now() { grep -ac "$1" "$2" 2>/dev/null || true; }  # grep prints the count (0 included)
 
           grab_maps() {
-            # $1 = tag; sample every live chrome pid's maps for sanitizer/shadow evidence
             for pid in $(timeout 10 adb shell ps -A 2>/dev/null | awk -v pkg=${{ env.PACKAGE }} '$NF ~ pkg {print $2}' | head -6); do
-              MAPS=$(timeout 10 adb shell "cat /proc/$pid/maps 2>/dev/null" | grep -iE "asan|shadow|__sanitizer" | head -8)
+              MAPS=$(timeout 10 adb shell "cat /proc/$pid/maps 2>/dev/null" | grep -iE "asan|shadow|__sanitizer|libmonochrome|\.so" | grep -iE "asan|shadow|sanitizer|monochrome" | head -12)
               if [ -n "$MAPS" ]; then
-                echo "[$1] pid $pid sanitizer mappings:" | tee -a /tmp/battery/probe_results.txt
-                echo "$MAPS" | tee -a /tmp/battery/probe_maps_$1.txt
+                echo "[$1] pid $pid library/sanitizer mappings:" | tee -a /tmp/battery/probe_results.txt
+                echo "$MAPS" >> /tmp/battery/probe_maps_$1.txt
               fi
-              # process name + state for the record
-              timeout 10 adb shell "cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' '; echo; grep -E 'State|VmRSS' /proc/$pid/status 2>/dev/null"                 | head -4 >> /tmp/battery/probe_pids_$1.txt 2>/dev/null || true
             done
           }
 
           collect_forensics() {
-            # $1 = tag
-            timeout 15 adb shell ls -la /data/tombstones/ > /tmp/forensics/tombstones_$1.txt 2>&1 || true
-            timeout 25 adb shell "cat /data/tombstones/*" > /tmp/forensics/tombstone_dump_$1.txt 2>&1 || true
-            timeout 15 adb shell dmesg > /tmp/forensics/dmesg_$1.txt 2>&1 || true
-            timeout 25 adb shell dumpsys dropbox > /tmp/forensics/dropbox_$1.txt 2>&1 || true
+            VT="$1"
+            timeout 15 adb shell ls -la /data/tombstones/ > /tmp/forensics/tombstones_ls_$VT.txt 2>&1 || true
+            timeout 30 adb shell "cat /data/tombstones/* 2>/dev/null" > /tmp/forensics/tombstone_dump_$VT.txt 2>&1 || true
+            timeout 15 adb shell dmesg > /tmp/forensics/dmesg_$VT.txt 2>&1 || true
+            timeout 25 adb shell dumpsys dropbox > /tmp/forensics/dropbox_$VT.txt 2>&1 || true
+            timeout 20 adb shell logcat -d -b events > /tmp/forensics/events_$VT.txt 2>&1 || true
+            cp -a /tmp/forensics/. /tmp/battery/ 2>/dev/null || true
           }
 
           run_probe() {
-            # $1 = variant tag; $2..: shell already configured for the variant
             VT="$1"
-            echo "=== PROBE $VT $(date -u +%FT%TZ) ===" | tee -a /tmp/battery/probe_results.txt
-            L0=$(baseline_loglen)
-            NAV0=$(grep -ac "NAVSTRESS" /tmp/logcat_full.log || true)
-            GETS0=$(grep -ac "GET " /tmp/httpserver.log 2>/dev/null || echo 0)
+            echo "=== PROBE $VT START $(date -u +%FT%TZ) ===" | tee -a /tmp/battery/probe_results.txt
+            L0=$(wc -l < /tmp/logcat_full.log)
+            NAV0=$(count_now "NAVSTRESS" /tmp/logcat_full.log); NAV0=${NAV0:-0}
+            GETS0=$(count_now "GET " /tmp/httpserver.log 2>/dev/null); GETS0=${GETS0:-0}
             timeout 40 adb shell am start -W -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "$PAGE_URL" > /tmp/battery/probe_${VT}_amstart.txt 2>&1 || true
-            ALIVE_MAX=0; ALIVE_PID=""; STABLE=no
-            for i in $(seq 1 25); do
+            ALIVE_MAX=0
+            for i in $(seq 1 15); do
               sleep 3
               PIDS=$(timeout 10 adb shell ps -A 2>/dev/null | awk -v pkg=${{ env.PACKAGE }} '$NF ~ pkg {print $2}' | head -4)
-              if [ -n "$PIDS" ]; then
-                ALIVE_MAX=$(( i * 3 )); ALIVE_PID=$(echo "$PIDS" | head -1); STABLE="alive ${ALIVE_MAX}s"
-                grab_maps "$VT" || true
-              fi
+              if [ -n "$PIDS" ]; then ALIVE_MAX=$(( i * 3 )); grab_maps "$VT" || true; fi
             done
-            NAV=$(( $(grep -ac "NAVSTRESS" /tmp/logcat_full.log || echo 0) - NAV0 ))
-            RESTARTS=$(new_starts_since "$L0")
-            GETS=$(( $(grep -ac "GET " /tmp/httpserver.log 2>/dev/null || echo 0) - GETS0 ))
+            NAV1=$(count_now "NAVSTRESS" /tmp/logcat_full.log); NAV1=${NAV1:-0}
+            GETS1=$(count_now "GET " /tmp/httpserver.log 2>/dev/null); GETS1=${GETS1:-0}
+            RESTARTS=$(tail -n +$(( L0 + 1 )) /tmp/logcat_full.log | grep -ac "Start proc.*${{ env.PACKAGE }}/.* for top-activity" || true); RESTARTS=${RESTARTS:-0}
+            NAV=$(( NAV1 - NAV0 )); GETS=$(( GETS1 - GETS0 ))
             timeout 20 adb shell screencap -p /sdcard/probe_${VT}.png || true
             timeout 20 adb pull /sdcard/probe_${VT}.png /tmp/battery/probe_${VT}.png >/dev/null 2>&1 || true
-            VERDICT="alive_max=${ALIVE_MAX}s restarts=${RESTARTS} navstress=${NAV} gets=${GETS}"
-            echo "PROBE $VT: $VERDICT" | tee -a /tmp/battery/probe_results.txt
-            timeout 20 adb logcat -d -b events > /tmp/forensics/events_${VT}.txt 2>&1 || true
+            echo "PROBE $VT VERDICT: alive_max=${ALIVE_MAX}s restarts=${RESTARTS} navstress=${NAV} gets=${GETS}" | tee -a /tmp/battery/probe_results.txt
             collect_forensics "$VT" || true
-            # survival = a chrome process alive >= 45s AND restart storm quiet (<=3 restarts)
-            if [ "$ALIVE_MAX" -ge 45 ] && [ "${RESTARTS:-99}" -le 3 ]; then echo "SURVIVOR=$VT" >> /tmp/battery/probe_results.txt; fi
+            if [ "$ALIVE_MAX" -ge 45 ] && [ "$RESTARTS" -le 3 ] && [ "$NAV" -ge 1 ]; then
+              echo "SURVIVOR=$VT" | tee -a /tmp/battery/probe_results.txt
+            fi
             force_stop || true
           }
 
           echo "PROBE ROUND START $(date -u +%FT%TZ)" > /tmp/battery/probe_results.txt
-
-          # V0 — baseline: command-line override present, permissive mode (the v11 configuration)
-          write_cmdline "$FEAT"
-          run_probe V0
-
-          # V1 — no command-line file (isolates the override's effect on startup)
-          timeout 15 adb shell rm -f /data/local/tmp/chrome-command-line || true
-          run_probe V1
           write_cmdline "$FEAT"
 
-          # V2 — SELinux enforcing (isolates permissive-mode interference)
-          timeout 15 adb shell setenforce 1 || true
-          run_probe V2
-          timeout 15 adb shell setenforce 0 || true
+          # P0 — diagnose the install/ownership state (no fix; baseline probe + ownership listing)
+          APPUID=$(timeout 15 adb shell dumpsys package ${{ env.PACKAGE }} 2>/dev/null | grep -oE "userId=[0-9]+" | head -1 | cut -d= -f2 | tr -d '\r')
+          APPUID=${APPUID:-10167}
+          echo "APP UID: $APPUID" | tee -a /tmp/battery/probe_results.txt
+          { timeout 15 adb shell "ls -la /data/app/ 2>/dev/null | grep -i ${{ env.PACKAGE }}";
+            timeout 15 adb shell "ls -laR /data/app/*/oat/ 2>/dev/null | head -60";
+            timeout 15 adb shell "ls -la /data/dalvik-cache/x86_64/ 2>/dev/null | head -40"; } > /tmp/battery/ownership_diagnosis.txt 2>&1 || true
+          run_probe P0
 
-          # V3 — full AOT compilation before launch (isolates the JIT/dex path)
-          timeout 240 adb shell cmd package compile -m speed -f ${{ env.PACKAGE }} > /tmp/battery/probe_V3_compile.txt 2>&1 || true
-          run_probe V3
+          # P1 — full AOT compilation of every dex (main + secondary)
+          timeout 300 adb shell cmd package compile -m everything -f ${{ env.PACKAGE }} > /tmp/battery/probe_P1_compile.txt 2>&1 || true
+          run_probe P1
 
-          # V4 — wrapper-property environment: runtime verbosity (activation canary; also a different spawn path)
-          clear_wrap
-          timeout 15 adb shell setprop wrap.${{ env.PACKAGE }} "ASAN_OPTIONS=verbosity=1" || true
-          run_probe V4
-          clear_wrap
+          # P2 — root ownership fix: hand the app's oat and cache entries to the app uid
+          timeout 20 adb shell "chown -R ${APPUID}:${APPUID} /data/app/ 2>/dev/null" || true
+          timeout 20 adb shell "chown -R ${APPUID}:${APPUID} /data/dalvik-cache/ 2>/dev/null" || true
+          run_probe P2
 
-          echo "=== PROBE ROUND END $(date -u +%FT%TZ) ===" >> /tmp/battery/probe_results.txt
+          # P3 — reinstall from the rooted shell (installer uid changes the ownership chain)
+          timeout 480 adb shell pm install -r -g /data/local/tmp/ChromePublic.apk > /tmp/battery/probe_P3_install.txt 2>&1 || true
+          write_cmdline "$FEAT"
+          run_probe P3
+
+          echo "=== PROBE ROUND END $(date -u +%FT%TZ) ===" | tee -a /tmp/battery/probe_results.txt
           echo "=== PROBE SUMMARY ==="
           cat /tmp/battery/probe_results.txt
+          echo "=== OWNERSHIP DIAGNOSIS (P0) ==="
+          cat /tmp/battery/ownership_diagnosis.txt 2>/dev/null | head -40 || true
 
-          # battery gate: first SURVIVOR in priority order whose configuration carries the feature override
-          # (V1 never qualifies — it ran without the override)
           SURVIVOR=""
-          for vt in V0 V2 V3 V4; do
+          for vt in P1 P2 P3; do
             if grep -q "SURVIVOR=$vt" /tmp/battery/probe_results.txt 2>/dev/null; then SURVIVOR="$vt"; break; fi
           done
           if [ -n "$SURVIVOR" ]; then
-            echo "PROBE SURVIVOR: $SURVIVOR — re-arming the battery with that configuration"
+            echo "PROBE SURVIVOR: $SURVIVOR — re-arming the battery with that fix state"
             echo "PROBE_SURVIVOR=$SURVIVOR" >> "$GITHUB_ENV"
-            # re-apply the winning configuration
+            if [ "$SURVIVOR" = "P1" ]; then timeout 300 adb shell cmd package compile -m everything -f ${{ env.PACKAGE }} >/dev/null 2>&1 || true; fi
+            if [ "$SURVIVOR" = "P2" ]; then timeout 20 adb shell "chown -R ${APPUID}:${APPUID} /data/app/ /data/dalvik-cache/ 2>/dev/null" || true; fi
+            if [ "$SURVIVOR" = "P3" ]; then timeout 480 adb shell pm install -r -g /data/local/tmp/ChromePublic.apk >/dev/null 2>&1 || true; fi
             write_cmdline "$FEAT"
-            if [ "$SURVIVOR" = "V2" ]; then timeout 15 adb shell setenforce 1 || true; fi
-            if [ "$SURVIVOR" = "V3" ]; then timeout 240 adb shell cmd package compile -m speed -f ${{ env.PACKAGE }} >/dev/null 2>&1 || true; fi
-            if [ "$SURVIVOR" = "V4" ]; then timeout 15 adb shell setprop wrap.${{ env.PACKAGE }} "ASAN_OPTIONS=verbosity=1" || true; fi
           else
-            echo "PROBE VERDICT: no variant produced a stable browser — battery skipped; forensics staged as the evidence"
+            echo "PROBE VERDICT: no fix produced a stable browser — battery skipped; forensics staged as the evidence"
             echo "PROBE_SURVIVOR=" >> "$GITHUB_ENV"
           fi
-          cp -a /tmp/forensics/. /tmp/battery/ 2>/dev/null || true
 
       - name: Run battery sessions (mode matrix)
         if: env.PROBE_SURVIVOR != ''
