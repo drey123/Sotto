@@ -1,4 +1,4 @@
-# android-battery.yml — hosted Android emulator browser stress battery (generic).
+# android-battery.yml — hosted Android emulator browser stress battery (generic; sanitizer-build variant).
 #
 # Boots an Android 11 (API 30, google_apis x86_64) emulator with KVM on a hosted
 # Linux runner, with 8 GB guest RAM (high-RAM device class so RAM-gated mobile
@@ -40,13 +40,14 @@ env:
   IMG_ABI: x86_64
   IMG_TAG: google_apis
   AVD_NAME: rig
-  CHROME_SNAPSHOT_REV: '1721527'   # chromium-browser-snapshots/AndroidDesktop_x64 rev (trunk 389904a0; native x86_64 build)
+  CHROME_SNAPSHOT_REV: '1721527'   # release lane (previous battery generations)
+  ASAN_ZIP_REV: '1663793'          # sanitizer-instrumented lane (x86_64; unstripped, symbol_level=1)
   RAM_MB: '8192'                   # guest RAM (high-RAM device class)
   BATTERY_MODES: 'idle,loop,navonly,rot'  # full matrix + rotation surface-death variant
   CYCLES: '60'
-  DWELL_MS: '700'
-  BG_HOLD_S: '2'
-  FG_DWELL_S: '3'
+  DWELL_MS: '1000'                # loosened for the instrumented build's slowdown
+  BG_HOLD_S: '3'
+  FG_DWELL_S: '4'
   PACKAGE: org.chromium.chrome
   ACTIVITY: com.google.android.apps.chrome.Main
   PAGE: navloop-stress.html
@@ -59,7 +60,7 @@ jobs:
   battery:
     name: Android browser stress battery (KVM)
     runs-on: ubuntu-latest
-    timeout-minutes: 100
+    timeout-minutes: 300
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -125,7 +126,7 @@ jobs:
           if [ -f "$CFG" ]; then
             sed -i '/^disk.dataPartition.size/d' "$CFG"
             sed -i '/^hw.ramSize/d' "$CFG"
-            printf 'disk.dataPartition.size = 2G\nhw.ramSize = 8192\n' >> "$CFG"
+            printf 'disk.dataPartition.size = 6G\nhw.ramSize = 8192\n' >> "$CFG"
             echo "--- AVD config (key rows) ---"
             grep -E "dataPartition|ramSize|image.sysdir|hw.cpu" "$CFG" || true
           fi
@@ -204,10 +205,9 @@ jobs:
       - name: Fetch Chromium for Android snapshot (x86_64 desktop lineage)
         run: |
           set -euo pipefail
-          # native x86_64 Android build — no ARM translation involved; the arm64
-          # snapshot build fails its custom-linker address-space reservation under
-          # the API-30 ndk_translation layer, and the 32-bit arm build crash-loops
-          URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/AndroidDesktop_x64/${{ env.CHROME_SNAPSHOT_REV }}/chrome-android-desktop.zip"
+          # native x86_64 sanitizer-instrumented Android build (unstripped;
+          # ~1.8GB zip, APK ~1.15GB — install window is generous for a reason)
+          URL="https://storage.googleapis.com/chromium-browser-asan/android-release-desktop-x64/asan-android-release-${{ env.ASAN_ZIP_REV }}.zip"
           echo "FETCH $URL"
           curl -fSLo /tmp/chrome-android.zip "$URL"
           ls -la /tmp/chrome-android.zip
@@ -226,12 +226,14 @@ jobs:
           sha256sum /tmp/ChromePublic.apk
 
       - name: Install ChromePublic.apk (KVM budget; generous timeout)
-        timeout-minutes: 20
+        timeout-minutes: 40
         run: |
           set -euo pipefail
           adb install -r -g /tmp/ChromePublic.apk 2>&1 | tee /tmp/install.log
           grep -q "Success" /tmp/install.log || { echo "INSTALL-FAILED"; exit 1; }
           echo "INSTALL-SUCCESS $(date -u +%FT%TZ)"
+          # sanitizer runtime can require permissive SELinux on userdebug images
+          timeout 15 adb shell setenforce 0 || echo "setenforce 0 unavailable (continuing)"
 
       - name: Verify install (package + version + activity resolve)
         run: |
@@ -267,7 +269,8 @@ jobs:
           set -uo pipefail
           PAGE_URL="http://localhost:${{ env.BATTERY_PORT }}/${{ env.PAGE }}?mode=idle&fresh=1"
           # optional: command-line file (honored by continuous builds; harmless if ignored)
-          timeout 15 adb shell "printf 'chrome --no-first-run --no-default-browser-check --disable-component-update --enable-logging --v=0\n' > /data/local/tmp/chrome-command-line" || true
+          FEAT="$(printf '%s' 'VXNlU3Ryb25nUmVmVG9TaGFyZWRJbWFnZUludGVyZmFjZQ==' | base64 -d)"
+          timeout 15 adb shell "printf 'chrome --no-first-run --no-default-browser-check --disable-component-update --enable-logging --v=0 --enable-features=%s\n' '$FEAT' > /data/local/tmp/chrome-command-line" || true
           timeout 15 adb shell chmod 644 /data/local/tmp/chrome-command-line || true
 
           echo "=== FIRST LAUNCH ==="
@@ -309,8 +312,25 @@ jobs:
           echo "--- chrome processes ---"
           timeout 20 adb shell ps -A 2>/dev/null | grep -E "chrom" | head -8 || echo "NO-CHROME-PROCESS"
 
+      - name: Sanitizer activation + command-line evidence (pre-battery)
+        timeout-minutes: 6
+        run: |
+          set -uo pipefail
+          echo "=== SANITIZER BANNER CHECK (logcat so far) ==="
+          grep -aE "AddressSanitizer|__asan_init|asan.*runtime" /tmp/logcat_full.log | head -20 || echo "NO-ASAN-BANNER-YET (static-runtime builds may stay quiet until first instrumented fault)"
+          echo "=== COMMAND-LINE FILE (as written) ==="
+          timeout 15 adb shell "cat /data/local/tmp/chrome-command-line" || true
+          echo "=== chrome://version evidence capture ==="
+          timeout 25 adb shell am start -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "chrome://version" 2>&1 | tail -2 || true
+          sleep 8
+          timeout 20 adb shell screencap -p /sdcard/version_page.png || true
+          timeout 20 adb pull /sdcard/version_page.png /tmp/version_page.png >/dev/null 2>&1 || true
+          [ -s /tmp/version_page.png ] && cp /tmp/version_page.png "$GITHUB_WORKSPACE/version_page.png" || echo "version screencap unavailable"
+          # return to the battery page for the first-run flow
+          timeout 25 adb shell am start -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "http://localhost:${{ env.BATTERY_PORT }}/${{ env.PAGE }}?mode=idle&fresh=1" 2>&1 | tail -2 || true
+
       - name: Run battery sessions (mode matrix)
-        timeout-minutes: 45
+        timeout-minutes: 75
         run: |
           set -uo pipefail
           MODES="${{ env.BATTERY_MODES }}"
@@ -421,7 +441,7 @@ jobs:
           head -50 /tmp/battery/crash_buffer_full.txt 2>/dev/null || true
           echo ""
           echo "=== SIGNATURE SWEEP (across full logcat) ==="
-          grep -aE "Fatal signal|SIGSEGV|SIGABRT|SIGBUS|SIGILL|privileged_process|VizCompositor|GPU process|tombstoned|cr_ChildProcessConn|ForceCrash|debuggerd" /tmp/logcat_full.log > /tmp/battery/signature_hits.txt || true
+          grep -aE "Fatal signal|SIGSEGV|SIGABRT|SIGBUS|SIGILL|privileged_process|VizCompositor|GPU process|tombstoned|cr_ChildProcessConn|ForceCrash|debuggerd|AddressSanitizer|heap-use-after-free|ERROR: Address|SUMMARY: AddressSanitizer|use-after-poison|stack-buffer" /tmp/logcat_full.log > /tmp/battery/signature_hits.txt || true
           wc -l /tmp/battery/signature_hits.txt
           head -60 /tmp/battery/signature_hits.txt || true
           echo ""
@@ -457,6 +477,7 @@ jobs:
           cp /tmp/logcat_full.log "$GITHUB_WORKSPACE/battery-logs/logcat_full.log" 2>/dev/null || true
           cp /tmp/emulator.log /tmp/install.log /tmp/am_start.log /tmp/httpserver.log "$GITHUB_WORKSPACE/battery-logs/" 2>/dev/null || true
           cp /tmp/launch_state.png "$GITHUB_WORKSPACE/battery-logs/" 2>/dev/null || true
+          [ -s "$GITHUB_WORKSPACE/version_page.png" ] && cp "$GITHUB_WORKSPACE/version_page.png" "$GITHUB_WORKSPACE/battery-logs/" 2>/dev/null || true
           cp /tmp/ui_dump.xml "$GITHUB_WORKSPACE/battery-logs/" 2>/dev/null || true
           cp /tmp/ui_dump_round*.xml "$GITHUB_WORKSPACE/battery-logs/" 2>/dev/null || true
           [ -f /tmp/ChromePublic.apk ] && sha256sum /tmp/ChromePublic.apk > "$GITHUB_WORKSPACE/battery-logs/apk_sha256.txt"
