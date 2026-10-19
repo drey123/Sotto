@@ -1,0 +1,173 @@
+# v8-rig-16byte-align.yml — flag-ON variant of the v8-rig d8 builder.
+#
+# Same canonical rig configuration (DCHECK_ALWAYS_ON release + sandbox +
+# memory-corruption API) plus the x64 16-byte stack alignment build flag
+# (v8_x64_16byte_stack_alignment = true; default-off upstream). Builds one
+# Linux leg at V8 main and publishes the d8 as an artifact so any
+# environment can rehydrate this rig variant without a local toolchain.
+#
+# Builds the standard rig configuration of d8 (DCHECK_ALWAYS_ON release + sandbox +
+# memory-corruption API) at a pinned revision and at main, on Linux and macOS arm64,
+# and publishes each as a downloadable artifact so any environment can rehydrate a
+# dynamic-testing rig without a local toolchain.
+#
+# Canonical rig args (keep verbatim; the smoke step fails the job if the
+# corruption API is missing):
+#   is_debug=false, dcheck_always_on=true, v8_enable_memory_corruption_api=true,
+#   v8_enable_sandbox=true, v8_enable_object_print=true, symbol_level=1,
+#   is_component_build=false.
+#
+# Triggers: this file is push-triggered (any edit re-fires the build); manual
+# dispatch is supported when the default input (main) is desired.
+#
+# Runner notes:
+#   ubuntu-latest = 4 cores / 16 GB RAM / ~14 GB free disk (pre-cleanup).
+#   macos-latest  = arm64, larger free disk.
+#   V8-only gn build with symbol_level=1 fits comfortably (~6-8 GB, 60-150 min).
+
+name: v8-rig-16byte-align
+
+concurrency:
+  group: v8-rig-16byte-align
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      v8_ref:
+        description: 'V8 git ref to build (commit SHA or branch name)'
+        required: false
+        default: 'main'
+  push:
+    paths:
+      - '.github/workflows/v8-rig-16byte-align.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build d8 rig (${{ matrix.os }} @ ${{ matrix.v8_ref }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        v8_ref: [main]
+
+    steps:
+      - name: Free runner disk (Linux only; protect the ~14 GB budget)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /usr/share/swift /usr/share/miniconda
+          df -h /
+          echo "JOB-START $(date -u +%FT%TZ) runner=$(uname -m) os=${{ runner.os }}"
+
+      - name: Checkout V8 (github mirror, pinned ref, depth 1)
+        uses: actions/checkout@v4
+        with:
+          repository: v8/v8
+          ref: ${{ matrix.v8_ref }}
+          fetch-depth: 1
+          path: v8
+
+      - name: Install depot_tools (+ CIPD bootstrap for gn/ninja wrappers)
+        run: |
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git \
+            "$GITHUB_WORKSPACE/depot_tools"
+          # The gn/autoninja wrappers require depot_tools' CIPD bootstrap
+          # (python3_bin_reldir.txt is only created by ensure_bootstrap/update).
+          ( cd "$GITHUB_WORKSPACE/depot_tools" && ./ensure_bootstrap ) || \
+            ( cd "$GITHUB_WORKSPACE/depot_tools" && ./update_depot_tools ) || \
+            echo "WARN: bootstrap scripts absent — relying on wrapper fallbacks"
+          echo "$GITHUB_WORKSPACE/depot_tools" >> "$GITHUB_PATH"
+          echo "DEPOT_TOOLS_UPDATE=0" >> "$GITHUB_ENV"
+
+      - name: Resolve V8 ref (branch vs detached SHA)
+        working-directory: ${{ github.workspace }}
+        run: |
+          git -C v8 remote set-url origin https://chromium.googlesource.com/v8/v8
+          REF="${{ matrix.v8_ref }}"
+          if [ "$REF" = "main" ]; then
+            git -C v8 checkout -B main
+          else
+            git -C v8 checkout --detach "$REF"
+          fi
+          git -C v8 rev-parse HEAD
+
+      - name: gclient sync (v8 alone, no history)
+        working-directory: ${{ github.workspace }}
+        run: |
+          # printf-generated: heredocs inside YAML blocks would inherit the YAML
+          # indentation and break gclient's python eval (IndentationError).
+          printf '%s\n' \
+            'solutions = [' \
+            '  { "name": "v8",' \
+            '    "url": "https://chromium.googlesource.com/v8/v8",' \
+            '    "deps_file": "DEPS",' \
+            '    "managed": False,' \
+            '    "custom_deps": {},' \
+            '    "custom_vars": {},' \
+            '  },' \
+            ']' > .gclient
+          python3 -c "compile(open('.gclient').read(),'.gclient','exec'); print('GCLIENT-CONFIG-PARSE-OK')"
+          gclient sync --no-history -D -j4
+
+      - name: Write args.gn (canonical + alignment variant) + gn gen out/rig
+        working-directory: ${{ github.workspace }}/v8
+        run: |
+          mkdir -p out/rig
+          printf '%s\n' \
+            '# Canonical rig args + 16-byte stack alignment variant — DO NOT EDIT.' \
+            'is_debug = false' \
+            'dcheck_always_on = true' \
+            'v8_enable_memory_corruption_api = true' \
+            'v8_enable_sandbox = true' \
+            'v8_enable_object_print = true' \
+            'symbol_level = 1' \
+            'is_component_build = false' \
+            'v8_x64_16byte_stack_alignment = true' > out/rig/args.gn
+          cat out/rig/args.gn
+          gn gen out/rig
+
+      - name: autoninja -C out/rig d8
+        working-directory: ${{ github.workspace }}/v8
+        timeout-minutes: 320
+        run: autoninja -C out/rig d8 -j4
+
+      - name: Stage rig artifact (natives/snapshot blob only IF PRESENT — static builds embed it)
+        working-directory: ${{ github.workspace }}/v8
+        run: |
+          STAGE="$GITHUB_WORKSPACE/rig-artifact"
+          mkdir -p "$STAGE"
+          cp -v out/rig/d8 "$STAGE/d8"
+          cp -v out/rig/icudtl.dat "$STAGE/icudtl.dat"
+          REV=$(git -C "$GITHUB_WORKSPACE/v8" rev-parse HEAD)
+          printf 'v8_revision=%s\nbuilt=%s\nrunner=%s %s\n' \
+            "$REV" "$(date -u +%FT%TZ)" "${{ runner.os }}" "$(uname -m)" > "$STAGE/BUILD_INFO.txt"
+          for f in natives_blob.bin snapshot_blob.bin; do
+            if [ -f "out/rig/$f" ]; then
+              cp -v "out/rig/$f" "$STAGE/$f"
+            else
+              echo "$f ABSENT (snapshot embedded in d8) — skipped"
+            fi
+          done
+          cat "$STAGE/BUILD_INFO.txt"
+          du -sh out/rig "$STAGE"; df -h / || true
+
+      - name: Smoke — d8 --version + corruption-API sanity (fail-hard)
+        working-directory: ${{ github.workspace }}/v8
+        continue-on-error: false
+        run: |
+          out/rig/d8 --version
+          out/rig/d8 --sandbox-testing -e 'print(typeof Sandbox!=="undefined" ? "CORRUPTION-API-OK" : "CORRUPTION-API-MISSING")'
+
+      - name: Upload artifact (retention 30 days)
+        uses: actions/upload-artifact@v4
+        with:
+          name: v8-rig-16byte-align-d8-${{ runner.os }}-${{ matrix.v8_ref }}
+          path: rig-artifact/
+          retention-days: 30
+          if-no-files-found: error
