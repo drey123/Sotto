@@ -2,7 +2,7 @@
 # with startup-diagnostics probe round: install/ownership fix ladder, forensic collection, battery gated
 # on a stable browser).
 #
-# Boots an Android 11 (API 30, google_apis x86_64) emulator with KVM on a hosted
+# Boots an Android 14 (API 34, google_apis x86_64) emulator with KVM on a hosted
 # Linux runner, with 8 GB guest RAM (high-RAM device class so RAM-gated mobile
 # platform features are active), installs a Chromium for Android snapshot build
 # (ChromePublic.apk from the public chromium-browser-snapshots bucket), dismisses
@@ -38,7 +38,7 @@ permissions:
   contents: read
 
 env:
-  API_LEVEL: '30'
+  API_LEVEL: '34'
   IMG_ABI: x86_64
   IMG_TAG: google_apis
   AVD_NAME: rig
@@ -336,6 +336,17 @@ jobs:
 
           echo "PROBE ROUND START $(date -u +%FT%TZ)" > /tmp/battery/probe_results.txt
           write_cmdline "$FEAT"
+
+          # controlled single-crash tombstone capture: wipe, ONE launch, short wait, read
+          # (the flood prunes tombstones; one controlled crash keeps the full frames)
+          timeout 15 adb shell "rm -f /data/tombstones/*" || true
+          timeout 40 adb shell am start -W -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "$PAGE_URL" > /tmp/battery/probe_CC_amstart.txt 2>&1 || true
+          sleep 3
+          timeout 30 adb shell "ls -la /data/tombstones/" > /tmp/battery/tombstones_cc_ls.txt 2>&1 || true
+          timeout 40 adb shell "cat /data/tombstones/* 2>/dev/null" > /tmp/battery/tombstone_cc_full.txt 2>&1 || true
+          timeout 20 adb shell am force-stop ${{ env.PACKAGE }} || true
+          sleep 5
+          echo "CONTROLLED-CRASH TOMBSTONE: $(wc -c < /tmp/battery/tombstone_cc_full.txt 2>/dev/null || echo 0) bytes" | tee -a /tmp/battery/probe_results.txt
 
           # P0 — diagnose the install/ownership state (no fix; baseline probe + ownership listing)
           APPUID=$(timeout 15 adb shell dumpsys package ${{ env.PACKAGE }} 2>/dev/null | grep -oE "userId=[0-9]+" | head -1 | cut -d= -f2 | tr -d '\r')
