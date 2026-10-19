@@ -1,6 +1,6 @@
 # android-battery.yml — hosted Android emulator browser stress battery (generic; sanitizer-build variant
-# with API-34 last-words probe round 2: wrap.sh LAST (permissive window), runner-side
-# foreground sweeper, --log-file loop-pulls, battery gated on a stable browser).
+# with API-34 discrimination round: release-lane control (LANE input), /proc resource
+# sampler + guest ceilings, verified sweeper push, battery gated on a stable browser).
 #
 # Boots an Android 14 (API 34, google_apis x86_64) emulator with KVM on a hosted
 # Linux runner, with 8 GB guest RAM (high-RAM device class so RAM-gated mobile
@@ -29,6 +29,9 @@ on:
       cycles:
         description: 'Background/foreground cycles per session'
         default: '30'
+      lane:
+        description: 'APK lane: asan (sanitizer desktop-lineage) or release (243MB control)'
+        default: 'asan'
   push:
     paths:
       - '.github/workflows/android-battery.yml'
@@ -209,23 +212,25 @@ jobs:
           set -euo pipefail
           # native x86_64 sanitizer-instrumented Android build (unstripped;
           # ~1.8GB zip, APK ~1.15GB — install window is generous for a reason)
-          URL="https://storage.googleapis.com/chromium-browser-asan/android-release-desktop-x64/asan-android-release-${{ env.ASAN_ZIP_REV }}.zip"
-          echo "FETCH $URL"
-          curl -fSLo /tmp/chrome-android.zip "$URL"
-          ls -la /tmp/chrome-android.zip
-          sha256sum /tmp/chrome-android.zip
-          unzip -o -q /tmp/chrome-android.zip -d /tmp/chrome-android
-          APK="$(find /tmp/chrome-android -name 'ChromePublic.apk' -type f | head -1)"
-          if [ -z "$APK" ]; then
-            echo "ChromePublic.apk not found — zip contents:"
-            find /tmp/chrome-android -name '*.apk' -type f
-            APK="$(find /tmp/chrome-android -name '*.apk' -type f | head -1)"
-            [ -n "$APK" ] || { echo "NO APK inside chrome-android.zip"; exit 1; }
+          if [ "${{ github.event.inputs.lane }}" = "release" ]; then
+            URL="https://commondatastorage.googleapis.com/chromium-browser-snapshots/AndroidDesktop_x64/${{ env.CHROME_SNAPSHOT_REV }}/chrome-android-desktop.zip"
+            echo "FETCH (release-lane control) $URL"
+            curl -fSLo /tmp/chrome-android.zip "$URL"
+            unzip -o -q /tmp/chrome-android.zip -d /tmp/chrome-android
+            APK="$(find /tmp/chrome-android -name 'ChromePublic.apk' -type f | head -1)"
+            [ -n "$APK" ] || { echo "NO ChromePublic.apk in release zip"; exit 1; }
+            cp -v "$APK" /tmp/ChromePublic.apk
+          else
+            APK="$(find /tmp/chrome-android -name 'ChromePublic.apk' -type f | head -1)"
+            if [ -z "$APK" ]; then
+              echo "ChromePublic.apk not found — zip contents:"
+              find /tmp/chrome-android -name '*.apk' -type f
+              APK="$(find /tmp/chrome-android -name '*.apk' -type f | head -1)"
+              [ -n "$APK" ] || { echo "NO APK inside chrome-android.zip"; exit 1; }
+            fi
+            echo "APK found: $APK"
+            cp -v "$APK" /tmp/ChromePublic.apk
           fi
-          echo "APK found: $APK"
-          cp -v "$APK" /tmp/ChromePublic.apk
-          ls -la /tmp/ChromePublic.apk
-          sha256sum /tmp/ChromePublic.apk
 
       - name: Install ChromePublic.apk (KVM budget; generous timeout)
         timeout-minutes: 40
@@ -324,8 +329,9 @@ jobs:
           sleep 0.2
           done
           EOS
-            timeout 15 adb push /tmp/sweep.sh /data/local/tmp/sweep.sh >/dev/null 2>&1 || true
+            timeout 15 adb push /tmp/sweep.sh /data/local/tmp/sweep.sh || true
             timeout 10 adb shell "chmod 755 /data/local/tmp/sweep.sh" || true
+            timeout 10 adb shell "ls -la /data/local/tmp/sweep.sh; df -h /data/local/tmp /data 2>/dev/null | head -6" || true
             adb shell /data/local/tmp/sweep.sh >/dev/null 2>&1 &
             SWEEP_PID=$!
           }
@@ -343,6 +349,22 @@ jobs:
                 echo "[$1] pid $pid library/sanitizer mappings:" | tee -a /tmp/battery/probe_results.txt
                 echo "$MAPS" >> /tmp/battery/probe_maps_$1.txt
               fi
+            done
+          }
+
+          sample_proc() {
+            # /proc resource sampler: Threads, VmPeak, map count, limits — the
+            # VA-vs-ceiling discriminator, sampled from the runner at ~0.5 s
+            SNAP=/tmp/battery/proc_samples_$1.txt
+            for i in $(seq 1 40); do
+              PID=$(timeout 8 adb shell pgrep -f ${{ env.PACKAGE }} 2>/dev/null | head -1 | tr -d '\r')
+              if [ -n "$PID" ]; then
+                { echo "=== $(date -u +%T) pid $PID";
+                  timeout 8 adb shell "cat /proc/$PID/status 2>/dev/null" | grep -E "^(Name|Threads|VmPeak|VmSize|VmRSS):" || true;
+                  timeout 8 adb shell "wc -l < /proc/$PID/maps 2>/dev/null" | awk '{print "map_count:", $1}' || true;
+                  timeout 8 adb shell "grep -E 'Max stack|Max address space|Max processes' /proc/$PID/limits 2>/dev/null" || true; } >> "$SNAP" 2>&1
+              fi
+              sleep 0.5
             done
           }
 
@@ -389,11 +411,18 @@ jobs:
           echo "APP UID: $APPUID" | tee -a /tmp/battery/probe_results.txt
 
 
+          # guest-wide ceilings (one-shot)
+          { timeout 10 adb shell "cat /proc/sys/kernel/threads-max /proc/sys/kernel/pid_max /proc/sys/vm/max_map_count 2>/dev/null";
+            timeout 10 adb shell "cat /sys/fs/cgroup/pids.max /sys/fs/cgroup/pids.current 2>/dev/null"; } | tee /tmp/battery/guest_ceilings.txt || true
+
           # V0 — baseline: feature override active, maps sweeper on (activation evidence)
           write_cmdline "$FEAT"
           start_sweeper
+          sample_proc V0 &
+          SAMPLER_PID=$!
           run_probe V0
           stop_sweeper V0
+          wait ${SAMPLER_PID:-0} 2>/dev/null || true
           collect_exit_info V0 || true
 
           # V1 — no command-line file at all (override-invariance on API-34)
