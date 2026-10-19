@@ -1,6 +1,6 @@
 # android-battery.yml — hosted Android emulator browser stress battery (generic; sanitizer-build variant
-# with startup-diagnostics probe round: install/ownership fix ladder, forensic collection, battery gated
-# on a stable browser).
+# with API-34 death-forensics probe round: exit-info classification, on-device maps sweeper,
+# override/flag isolation variants, battery gated on a stable browser).
 #
 # Boots an Android 14 (API 34, google_apis x86_64) emulator with KVM on a hosted
 # Linux runner, with 8 GB guest RAM (high-RAM device class so RAM-gated mobile
@@ -273,7 +273,7 @@ jobs:
           timeout 15 adb reverse "tcp:$PORT" "tcp:$PORT" && echo "ADB-REVERSE-OK port $PORT"
           echo "BATTERY_PORT=$PORT" >> "$GITHUB_ENV"
 
-      - name: Startup probe + install/ownership fix ladder (diagnostics; battery gate)
+      - name: Startup probe + API-34 death forensics (exit-info, maps sweeper, flag isolation)
         timeout-minutes: 45
         run: |
           set -uo pipefail
@@ -284,12 +284,41 @@ jobs:
             timeout 15 adb shell "printf 'chrome --no-first-run --no-default-browser-check --disable-component-update --enable-logging --v=0 --enable-features=%s\n' '$1' > /data/local/tmp/chrome-command-line" || true
             timeout 15 adb shell chmod 644 /data/local/tmp/chrome-command-line || true
           }
+          write_cmdline_benign() {
+            timeout 15 adb shell "printf 'chrome --no-first-run --no-default-browser-check --disable-component-update --enable-logging --v=0\n' > /data/local/tmp/chrome-command-line" || true
+            timeout 15 adb shell chmod 644 /data/local/tmp/chrome-command-line || true
+          }
           force_stop() { timeout 20 adb shell am force-stop ${{ env.PACKAGE }} || true; sleep 5; }
-          count_now() { grep -ac "$1" "$2" 2>/dev/null || true; }  # grep prints the count (0 included)
+          count_now() { grep -ac "$1" "$2" 2>/dev/null || true; }
+
+          # APPUID extraction GUARDED (v11d died here: grep no-match under pipefail)
+          APPUID=$(timeout 25 adb shell dumpsys package ${{ env.PACKAGE }} 2>/dev/null | grep -oE "userId=[0-9]+" | head -1 | cut -d= -f2 | tr -d '\r' || true)
+          APPUID=$(printf '%s' "$APPUID" | tr -d '[:space:]')
+          APPUID=${APPUID:-10167}
+
+          # API-34 process exit records: the per-pid death classification
+          collect_exit_info() {
+            timeout 25 adb shell dumpsys activity exit-info ${{ env.PACKAGE }} > /tmp/battery/exit_info_$1.txt 2>&1 || true
+          }
+
+          # on-device maps sweeper: storm processes live ~200-500 ms; a 3 s-interval
+          # runner-side sampler never catches them. This loop samples every 0.2 s
+          # on device and appends full maps of every live package pid.
+          start_sweeper() {
+            adb shell "sh -c 'while true; do for p in \$(pgrep -f ${{ env.PACKAGE }} 2>/dev/null); do m=\$(cat /proc/\$p/maps 2>/dev/null); if [ -n "\$m" ]; then echo "=== pid \$p \$(date +%H%M%S)"; echo "\$m"; fi; done; sleep 0.2; done > /data/local/tmp/maps_sweep.txt 2>&1'" >/dev/null 2>&1 &
+            SWEEP_BG=$!
+          }
+          stop_sweeper() {
+            kill $SWEEP_BG 2>/dev/null || true
+            timeout 15 adb shell "pkill -f 'maps_sweep.txt' 2>/dev/null; pkill -f 'while true; do for p' 2>/dev/null" || true
+            sleep 2
+            timeout 30 adb pull /data/local/tmp/maps_sweep.txt /tmp/battery/maps_sweep_$1.txt >/dev/null 2>&1 || true
+            timeout 10 adb shell "rm -f /data/local/tmp/maps_sweep.txt" || true
+          }
 
           grab_maps() {
             for pid in $(timeout 10 adb shell ps -A 2>/dev/null | awk -v pkg=${{ env.PACKAGE }} '$NF ~ pkg {print $2}' | head -6); do
-              MAPS=$(timeout 10 adb shell "cat /proc/$pid/maps 2>/dev/null" | grep -iE "asan|shadow|__sanitizer|libmonochrome|\.so" | grep -iE "asan|shadow|sanitizer|monochrome" | head -12)
+              MAPS=$(timeout 10 adb shell "cat /proc/$pid/maps 2>/dev/null" | grep -iE "asan|shadow|__sanitizer|libmonochrome" | head -12)
               if [ -n "$MAPS" ]; then
                 echo "[$1] pid $pid library/sanitizer mappings:" | tee -a /tmp/battery/probe_results.txt
                 echo "$MAPS" >> /tmp/battery/probe_maps_$1.txt
@@ -304,6 +333,7 @@ jobs:
             timeout 15 adb shell dmesg > /tmp/forensics/dmesg_$VT.txt 2>&1 || true
             timeout 25 adb shell dumpsys dropbox > /tmp/forensics/dropbox_$VT.txt 2>&1 || true
             timeout 20 adb shell logcat -d -b events > /tmp/forensics/events_$VT.txt 2>&1 || true
+            collect_exit_info "$VT" || true
             cp -a /tmp/forensics/. /tmp/battery/ 2>/dev/null || true
           }
 
@@ -335,10 +365,27 @@ jobs:
           }
 
           echo "PROBE ROUND START $(date -u +%FT%TZ)" > /tmp/battery/probe_results.txt
-          write_cmdline "$FEAT"
+          echo "APP UID: $APPUID" | tee -a /tmp/battery/probe_results.txt
 
-          # controlled single-crash tombstone capture: wipe, ONE launch, short wait, read
-          # (the flood prunes tombstones; one controlled crash keeps the full frames)
+          # V0 — baseline: feature override active, maps sweeper on (activation evidence)
+          write_cmdline "$FEAT"
+          start_sweeper
+          run_probe V0
+          stop_sweeper V0
+          collect_exit_info V0 || true
+
+          # V1 — no command-line file at all (override-invariance on API-34)
+          timeout 15 adb shell "rm -f /data/local/tmp/chrome-command-line" || true
+          run_probe V1
+          collect_exit_info V1 || true
+
+          # V2 — benign command line (flags without --enable-features: flag isolation)
+          write_cmdline_benign
+          run_probe V2
+          collect_exit_info V2 || true
+
+          # controlled single-crash tombstone capture (kept from v11d: wipe, one launch, read)
+          write_cmdline "$FEAT"
           timeout 15 adb shell "rm -f /data/tombstones/*" || true
           timeout 40 adb shell am start -W -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "$PAGE_URL" > /tmp/battery/probe_CC_amstart.txt 2>&1 || true
           sleep 3
@@ -347,49 +394,41 @@ jobs:
           timeout 20 adb shell am force-stop ${{ env.PACKAGE }} || true
           sleep 5
           echo "CONTROLLED-CRASH TOMBSTONE: $(wc -c < /tmp/battery/tombstone_cc_full.txt 2>/dev/null || echo 0) bytes" | tee -a /tmp/battery/probe_results.txt
-
-          # P0 — diagnose the install/ownership state (no fix; baseline probe + ownership listing)
-          APPUID=$(timeout 15 adb shell dumpsys package ${{ env.PACKAGE }} 2>/dev/null | grep -oE "userId=[0-9]+" | head -1 | cut -d= -f2 | tr -d '\r')
-          APPUID=${APPUID:-10167}
-          echo "APP UID: $APPUID" | tee -a /tmp/battery/probe_results.txt
-          { timeout 15 adb shell "ls -la /data/app/ 2>/dev/null | grep -i ${{ env.PACKAGE }}";
-            timeout 15 adb shell "ls -laR /data/app/*/oat/ 2>/dev/null | head -60";
-            timeout 15 adb shell "ls -la /data/dalvik-cache/x86_64/ 2>/dev/null | head -40"; } > /tmp/battery/ownership_diagnosis.txt 2>&1 || true
-          run_probe P0
-
-          # P1 — full AOT compilation of every dex (main + secondary)
-          timeout 300 adb shell cmd package compile -m everything -f ${{ env.PACKAGE }} > /tmp/battery/probe_P1_compile.txt 2>&1 || true
-          run_probe P1
-
-          # P2 — root ownership fix: hand the app's oat and cache entries to the app uid
-          timeout 20 adb shell "chown -R ${APPUID}:${APPUID} /data/app/ 2>/dev/null" || true
-          timeout 20 adb shell "chown -R ${APPUID}:${APPUID} /data/dalvik-cache/ 2>/dev/null" || true
-          run_probe P2
-
-          # P3 — reinstall from the rooted shell (installer uid changes the ownership chain)
-          timeout 480 adb shell pm install -r -g /data/local/tmp/ChromePublic.apk > /tmp/battery/probe_P3_install.txt 2>&1 || true
-          write_cmdline "$FEAT"
-          run_probe P3
+          collect_exit_info CC || true
 
           echo "=== PROBE ROUND END $(date -u +%FT%TZ) ===" | tee -a /tmp/battery/probe_results.txt
           echo "=== PROBE SUMMARY ==="
           cat /tmp/battery/probe_results.txt
-          echo "=== OWNERSHIP DIAGNOSIS (P0) ==="
-          cat /tmp/battery/ownership_diagnosis.txt 2>/dev/null | head -40 || true
+          echo "=== EXIT-INFO (V0 head) ==="
+          head -60 /tmp/battery/exit_info_V0.txt 2>/dev/null || true
+          echo "=== MAPS SWEEP (V0, sanitizer/monochrome grep) ==="
+          grep -iE "=== pid|asan|shadow|__sanitizer|libmonochrome" /tmp/battery/maps_sweep_V0.txt 2>/dev/null | head -40 || true
+          echo "MAPS_SWEEP_SIZE: $(wc -c < /tmp/battery/maps_sweep_V0.txt 2>/dev/null || echo 0)" | tee -a /tmp/battery/probe_results.txt
 
           SURVIVOR=""
-          for vt in P1 P2 P3; do
+          for vt in V0 V1 V2; do
             if grep -q "SURVIVOR=$vt" /tmp/battery/probe_results.txt 2>/dev/null; then SURVIVOR="$vt"; break; fi
           done
           if [ -n "$SURVIVOR" ]; then
-            echo "PROBE SURVIVOR: $SURVIVOR — re-arming the battery with that fix state"
+            echo "PROBE SURVIVOR: $SURVIVOR — re-arming the battery with that cmdline state"
             echo "PROBE_SURVIVOR=$SURVIVOR" >> "$GITHUB_ENV"
-            if [ "$SURVIVOR" = "P1" ]; then timeout 300 adb shell cmd package compile -m everything -f ${{ env.PACKAGE }} >/dev/null 2>&1 || true; fi
-            if [ "$SURVIVOR" = "P2" ]; then timeout 20 adb shell "chown -R ${APPUID}:${APPUID} /data/app/ /data/dalvik-cache/ 2>/dev/null" || true; fi
-            if [ "$SURVIVOR" = "P3" ]; then timeout 480 adb shell pm install -r -g /data/local/tmp/ChromePublic.apk >/dev/null 2>&1 || true; fi
-            write_cmdline "$FEAT"
+            if [ "$SURVIVOR" = "V0" ]; then write_cmdline "$FEAT"; fi
+            if [ "$SURVIVOR" = "V1" ]; then timeout 15 adb shell "rm -f /data/local/tmp/chrome-command-line" || true; fi
+            if [ "$SURVIVOR" = "V2" ]; then write_cmdline_benign; fi
+            if [ "$SURVIVOR" != "V0" ]; then
+              # a survivor WITHOUT the feature override is a diagnostic-only survivor:
+              # re-arm the override and re-probe briefly before the battery
+              write_cmdline "$FEAT"
+              timeout 40 adb shell am start -W -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "$PAGE_URL" > /tmp/battery/probe_V0r_amstart.txt 2>&1 || true
+              sleep 45
+              P0R=$(timeout 10 adb shell ps -A 2>/dev/null | awk -v pkg=${{ env.PACKAGE }} '$NF ~ pkg {print $2}' | head -1)
+              if [ -z "$P0R" ]; then
+                echo "PROBE VERDICT: survivor died once the override was re-armed — battery skipped; forensics staged as the evidence" | tee -a /tmp/battery/probe_results.txt
+                echo "PROBE_SURVIVOR=" >> "$GITHUB_ENV"
+              fi
+            fi
           else
-            echo "PROBE VERDICT: no fix produced a stable browser — battery skipped; forensics staged as the evidence"
+            echo "PROBE VERDICT: no variant produced a stable browser — battery skipped; forensics staged as the evidence" | tee -a /tmp/battery/probe_results.txt
             echo "PROBE_SURVIVOR=" >> "$GITHUB_ENV"
           fi
 
