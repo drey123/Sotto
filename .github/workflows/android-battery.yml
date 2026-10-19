@@ -1,6 +1,6 @@
 # android-battery.yml — hosted Android emulator browser stress battery (generic; sanitizer-build variant
-# with API-34 last-words probe round: wrap.sh stderr capture, ASAN verbosity
-# activation probe, --log-file loop-pulls, NUL-safe sweeper, battery gated on a stable browser).
+# with API-34 last-words probe round 2: wrap.sh LAST (permissive window), runner-side
+# foreground sweeper, --log-file loop-pulls, battery gated on a stable browser).
 #
 # Boots an Android 14 (API 34, google_apis x86_64) emulator with KVM on a hosted
 # Linux runner, with 8 GB guest RAM (high-RAM device class so RAM-gated mobile
@@ -326,10 +326,11 @@ jobs:
           EOS
             timeout 15 adb push /tmp/sweep.sh /data/local/tmp/sweep.sh >/dev/null 2>&1 || true
             timeout 10 adb shell "chmod 755 /data/local/tmp/sweep.sh" || true
-            adb shell "setsid /data/local/tmp/sweep.sh >/dev/null 2>&1 < /dev/null &" >/dev/null 2>&1 || true
+            adb shell /data/local/tmp/sweep.sh >/dev/null 2>&1 &
+            SWEEP_PID=$!
           }
           stop_sweeper() {
-            timeout 15 adb shell "pkill -f sweep.sh 2>/dev/null" || true
+            kill ${SWEEP_PID:-0} 2>/dev/null || true
             sleep 2
             timeout 30 adb pull /data/local/tmp/maps_sweep.txt /tmp/battery/maps_sweep_$1.txt >/dev/null 2>&1 || true
             timeout 10 adb shell "rm -f /data/local/tmp/maps_sweep.txt /data/local/tmp/sweep.sh" || true
@@ -387,38 +388,6 @@ jobs:
           echo "PROBE ROUND START $(date -u +%FT%TZ)" > /tmp/battery/probe_results.txt
           echo "APP UID: $APPUID" | tee -a /tmp/battery/probe_results.txt
 
-          # V0w — WRAP probe (the last-words round): capture the app STDERR via the
-          # wrap property; ASAN_OPTIONS verbosity = the direct activation probe (a
-          # statically-linked sanitizer runtime MUST print init chatter when verbose).
-          cat > /tmp/wrap.sh <<'EOW'
-          #!/system/bin/sh
-          export ASAN_OPTIONS=verbosity=2:log_path=/data/local/tmp/asan_runtime.log
-          exec "$@" 2>>/data/local/tmp/chrome_stderr.log
-          EOW
-          timeout 15 adb push /tmp/wrap.sh /data/local/tmp/wrap.sh >/dev/null 2>&1 || true
-          timeout 10 adb shell "chmod 755 /data/local/tmp/wrap.sh" || true
-          timeout 10 adb shell "rm -f /data/local/tmp/chrome_stderr.log /data/local/tmp/asan_runtime.log /data/local/tmp/chrome_main.log" || true
-          timeout 10 adb shell setprop wrap.org.chromium.chrome "/data/local/tmp/wrap.sh" || true
-          write_cmdline "$FEAT"
-          echo "=== PROBE V0w START $(date -u +%FT%TZ) ===" | tee -a /tmp/battery/probe_results.txt
-          mkdir -p /tmp/battery/v0w_pulls
-          timeout 40 adb shell am start -W -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "$PAGE_URL" > /tmp/battery/probe_V0w_amstart.txt 2>&1 || true
-          PULL_N=0
-          for i in $(seq 1 30); do
-            sleep 2
-            PULL_N=$(( PULL_N + 1 ))
-            timeout 15 adb pull /data/local/tmp/chrome_stderr.log /tmp/battery/v0w_pulls/stderr_gen${PULL_N}.log >/dev/null 2>&1 || true
-            timeout 15 adb pull /data/local/tmp/chrome_main.log /tmp/battery/v0w_pulls/main_gen${PULL_N}.log >/dev/null 2>&1 || true
-            timeout 15 adb shell "wc -c /data/local/tmp/chrome_stderr.log /data/local/tmp/asan_runtime.log /data/local/tmp/chrome_main.log 2>/dev/null" >> /tmp/battery/probe_results.txt 2>&1 || true
-            timeout 10 adb shell "truncate -s 0 /data/local/tmp/chrome_stderr.log 2>/dev/null" || true
-          done
-          timeout 20 adb shell am force-stop ${{ env.PACKAGE }} || true
-          sleep 3
-          timeout 15 adb shell setprop wrap.org.chromium.chrome "" || true
-          timeout 15 adb shell "rm -f /data/local/tmp/wrap.sh" || true
-          echo "V0w STDERR TOTALS: $(cat /tmp/battery/v0w_pulls/stderr_gen*.log 2>/dev/null | wc -c) bytes across ${PULL_N} generations" | tee -a /tmp/battery/probe_results.txt
-          echo "=== PROBE V0w END $(date -u +%FT%TZ) ===" | tee -a /tmp/battery/probe_results.txt
-          collect_exit_info V0w || true
 
           # V0 — baseline: feature override active, maps sweeper on (activation evidence)
           write_cmdline "$FEAT"
@@ -448,6 +417,42 @@ jobs:
           sleep 5
           echo "CONTROLLED-CRASH TOMBSTONE: $(wc -c < /tmp/battery/tombstone_cc_full.txt 2>/dev/null || echo 0) bytes" | tee -a /tmp/battery/probe_results.txt
           collect_exit_info CC || true
+
+          # V0w — WRAP probe (LAST: property stays set at run end; empty-string setprop
+          # does NOT clear the wrap path — v11f evidence). SELinux permissive for the
+          # window (avc denied exec of /data/local/tmp scripts for untrusted_app).
+          # wrap property; ASAN_OPTIONS verbosity = the direct activation probe (a
+          # statically-linked sanitizer runtime MUST print init chatter when verbose).
+          cat > /tmp/wrap.sh <<'EOW'
+          #!/system/bin/sh
+          export ASAN_OPTIONS=verbosity=2:log_path=/data/local/tmp/asan_runtime.log
+          exec "$@" 2>>/data/local/tmp/chrome_stderr.log
+          EOW
+          timeout 15 adb push /tmp/wrap.sh /data/local/tmp/wrap.sh >/dev/null 2>&1 || true
+          timeout 10 adb shell "chmod 755 /data/local/tmp/wrap.sh" || true
+          timeout 10 adb shell "rm -f /data/local/tmp/chrome_stderr.log /data/local/tmp/asan_runtime.log /data/local/tmp/chrome_main.log" || true
+          timeout 10 adb shell setenforce 0 || true
+          timeout 10 adb shell setprop wrap.org.chromium.chrome "/data/local/tmp/wrap.sh" || true
+          write_cmdline "$FEAT"
+          echo "=== PROBE V0w START $(date -u +%FT%TZ) ===" | tee -a /tmp/battery/probe_results.txt
+          mkdir -p /tmp/battery/v0w_pulls
+          timeout 40 adb shell am start -W -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "$PAGE_URL" > /tmp/battery/probe_V0w_amstart.txt 2>&1 || true
+          PULL_N=0
+          for i in $(seq 1 30); do
+            sleep 2
+            PULL_N=$(( PULL_N + 1 ))
+            timeout 15 adb pull /data/local/tmp/chrome_stderr.log /tmp/battery/v0w_pulls/stderr_gen${PULL_N}.log >/dev/null 2>&1 || true
+            timeout 15 adb pull /data/local/tmp/chrome_main.log /tmp/battery/v0w_pulls/main_gen${PULL_N}.log >/dev/null 2>&1 || true
+            timeout 15 adb shell "wc -c /data/local/tmp/chrome_stderr.log /data/local/tmp/asan_runtime.log /data/local/tmp/chrome_main.log 2>/dev/null" >> /tmp/battery/probe_results.txt 2>&1 || true
+            timeout 10 adb shell "truncate -s 0 /data/local/tmp/chrome_stderr.log 2>/dev/null" || true
+          done
+          timeout 20 adb shell am force-stop ${{ env.PACKAGE }} || true
+          sleep 3
+          # SELinux stays PERMISSIVE to run end (wrap.sh pass-through must exec for the battery; v11b evidence: permissive/enforcing identical storm)
+          echo "V0w STDERR TOTALS: $(cat /tmp/battery/v0w_pulls/stderr_gen*.log 2>/dev/null | wc -c) bytes across ${PULL_N} generations" | tee -a /tmp/battery/probe_results.txt
+          echo "=== PROBE V0w END $(date -u +%FT%TZ) ===" | tee -a /tmp/battery/probe_results.txt
+          collect_exit_info V0w || true
+
 
           echo "=== PROBE ROUND END $(date -u +%FT%TZ) ===" | tee -a /tmp/battery/probe_results.txt
           echo "=== PROBE SUMMARY ==="
