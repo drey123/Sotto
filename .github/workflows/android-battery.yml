@@ -235,6 +235,9 @@ jobs:
             unzip -o -q /tmp/chrome-android.zip -d /tmp/chrome-android
             APK="$(find /tmp/chrome-android -name 'ChromePublic.apk' -type f | head -1)"
             [ -n "$APK" ] || { echo "NO ChromePublic.apk in release zip"; exit 1; }
+            cp -v "$APK" /tmp/ChromePublic.apk
+            ls -la /tmp/ChromePublic.apk
+            sha256sum /tmp/ChromePublic.apk
           fi
 
       - name: Install ChromePublic.apk (KVM budget; generous timeout)
@@ -696,5 +699,3 @@ jobs:
           path: battery-logs/
           retention-days: 14
           if-no-files-found: warn
-
-# re-fire: release control retry after the runner sdk-install broken-pipe failure (run 39342635031)
