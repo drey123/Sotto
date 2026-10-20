@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<!--
+  media-stress.html — concurrent H264 decode stress page for the v12 Tier-B hunt.
+
+  Purpose: keep N concurrent <video> decode sessions alive (muted autoplay loops),
+  rotating element re-creation so fresh MediaCodec decode sessions start repeatedly,
+  and log every lifecycle event with the literal prefix "[MEDIASTRESS]" so adb logcat
+  can grep the session. The page reports decode diagnostics (videoWidth/readyState/
+  error events) so a rig where the media axis is dead (no decode traffic) is an
+  observable, honestly-classified outcome rather than a silent gap.
+
+  Modes (URL params):
+    ?count=3     concurrent videos
+    &rotate=8    seconds before an element is re-created (new decode session)
+    &dur=0       0 = loop forever until navigation/visibility change
+
+  Events logged: play, playing, timeupdate (sampled), ended, error (with code),
+  stalled, suspend, canplay, visibilitychange, page load. Errors matter as much
+  as success: the MEDIA-AXIS-DEAD evidence class is decided by them.
+
+  No claims are made about any specific defect; this is load tooling.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>media-stress</title>
+<style>
+  html,body{margin:0;padding:0;background:#101418;color:#d8e0e8;font:13px/1.45 monospace}
+  header{padding:10px 12px;background:#1b232c;border-bottom:1px solid #2c3844}
+  h1{font-size:14px;margin:0 0 4px}
+  #stats div{padding:1px 0}
+  #log{padding:8px 12px;white-space:pre-wrap;word-break:break-all}
+  .ln{color:#9fb4c8}
+  video{display:block;width:100%;max-width:340px;margin:6px auto;background:#000}
+  .vrow{border-bottom:1px dashed #2c3844;padding:4px 0}
+  .tag{color:#7fe0a8}
+</style>
+</head>
+<body>
+<header>
+  <h1>media-stress — <span id="mode">?</span></h1>
+  <div id="stats">
+    <div>videos: <b id="c_vid">0</b> &nbsp; playing: <b id="c_play">0</b> &nbsp; errors: <b id="c_err">0</b>
+         &nbsp; rotations: <b id="c_rot">0</b> &nbsp; vis lost: <b id="c_vl">0</b></div>
+    <div>loaded: <b id="c_load">0</b> &nbsp; t: <b id="c_t">0</b> s</div>
+  </div>
+</header>
+<div id="stage"></div>
+<div id="log" class="ln"></div>
+<script>
+(function () {
+  'use strict';
+
+  // ---------- params ----------
+  var q = {};
+  location.search.replace(/[?&]([^=&]*)=([^&]*)/g, function (_, k, v) {
+    q[k] = decodeURIComponent(v);
+  });
+  var COUNT = Math.max(1, Math.min(6, parseInt(q.count || '3', 10) || 3));
+  var ROTATE = Math.max(0, parseInt(q.rotate || '8', 10)); // 0 = never rotate
+  var SRC = q.src || 'media_a.mp4';
+  var SRC2 = q.src2 || 'media_b.mp4';
+
+  document.getElementById('mode').textContent =
+    'count=' + COUNT + ' rotate=' + ROTATE + 's src=' + SRC;
+
+  // ---------- logging ----------
+  var LINES = [];
+  function log(msg) {
+    var ts = ((performance.now() / 1000).toFixed(2));
+    var line = '[MEDIASTRESS] t=' + ts + ' ' + msg;
+    LINES.push(line);
+    if (LINES.length > 400) LINES.shift();
+    try { console.log(line); } catch (e) {}
+    var el = document.getElementById('log');
+    if (el) { el.textContent = LINES.slice(-60).join('\n'); }
+  }
+  log('PAGE-LOAD count=' + COUNT + ' rotate=' + ROTATE + ' src=' + SRC +
+      ' ua=' + navigator.userAgent.slice(0, 80));
+
+  // ---------- stats ----------
+  var stats = { videos: 0, playing: 0, errors: 0, rotations: 0, loaded: 0, vislost: 0 };
+  function stat(id, val) { var e = document.getElementById(id); if (e) e.textContent = val; }
+  function paint() {
+    stat('c_vid', stats.videos); stat('c_play', stats.playing);
+    stat('c_err', stats.errors); stat('c_rot', stats.rotations);
+    stat('c_load', stats.loaded); stat('c_vl', stats.vislost);
+  }
+  setInterval(function () { stat('c_t', Math.round(performance.now() / 1000)); paint(); }, 1000);
+
+  // ---------- video elements ----------
+  var vms = [];
+  function describeMedia(v) {
+    try {
+      return 'vw=' + v.videoWidth + 'x' + v.videoHeight +
+        ' ready=' + v.readyState + ' dur=' + (v.duration ? v.duration.toFixed(1) : '?') +
+        ' cur=' + v.currentTime.toFixed(1) + ' paused=' + v.paused;
+    } catch (e) { return 'describe-failed'; }
+  }
+  function errText(v) {
+    var e = v.error, m = 'none';
+    if (e) {
+      m = 'code=' + e.code +
+        (e.message ? ' msg=' + e.message.slice(0, 80) : '');
+    }
+    return m;
+  }
+  function makeVideo(slot) {
+    var v = document.createElement('video');
+    v.muted = true;            // muted autoplay is allowed
+    v.autoplay = true;
+    v.loop = true;             // loop forever; rotate() creates fresh sessions
+    v.playsInline = true;
+    v.setAttribute('webkit-playsinline', 'true');
+    v.src = (slot % 2 === 0) ? SRC : SRC2;
+    v.className = 'vrow';
+
+    v.addEventListener('loadedmetadata', function () {
+      stats.loaded++;
+      log('LOADED slot=' + slot + ' ' + describeMedia(v));
+    });
+    v.addEventListener('play', function () { log('PLAY slot=' + slot + ' ' + describeMedia(v)); });
+    v.addEventListener('playing', function () {
+      stats.playing++;
+      log('PLAYING slot=' + slot + ' ' + describeMedia(v));
+    });
+    v.addEventListener('canplay', function () {
+      log('CANPLAY slot=' + slot + ' ' + describeMedia(v));
+    });
+    v.addEventListener('stalled', function () { log('STALLED slot=' + slot); });
+    v.addEventListener('error', function () {
+      stats.errors++;
+      log('ERROR slot=' + slot + ' ' + errText(v) + ' ' + describeMedia(v));
+    });
+    v.addEventListener('ended', function () { log('ENDED slot=' + slot); });
+
+    stats.videos++;
+    return v;
+  }
+
+  function buildAll() {
+    var stage = document.getElementById('stage');
+    stage.textContent = '';
+    vms = [];
+    for (var i = 0; i < COUNT; i++) {
+      var v = makeVideo(i);
+      vms.push(v);
+      stage.appendChild(v);
+    }
+    log('BUILD count=' + COUNT);
+    // kick playback explicitly (autoplay is best-effort)
+    setTimeout(function () {
+      vms.forEach(function (v, i) {
+        var p = v.play();
+        if (p && p.then) {
+          p.then(function () { log('PLAY-OK slot=' + i); })
+           .catch(function (err) {
+             stats.errors++;
+             log('PLAY-REJECT slot=' + i + ' err=' + (err && err.name ? err.name : String(err).slice(0, 60)));
+           });
+        }
+      });
+    }, 300);
+  }
+  buildAll();
+
+  // ---------- rotation: fresh decode sessions ----------
+  if (ROTATE > 0) {
+    setInterval(function () {
+      stats.rotations++;
+      log('ROTATE round=' + stats.rotations + ' state=' +
+          vms.map(function (v) { return describeMedia(v); }).join(' | ').slice(0, 240));
+      buildAll();
+    }, ROTATE * 1000);
+  }
+
+  // ---------- visibility ----------
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { stats.vislost++; log('VIS-LOST'); }
+    else { log('VIS-GAINED'); }
+  });
+  window.addEventListener('pagehide', function () { log('PAGE-HIDE'); });
+
+  // ---------- periodic state pulse (decode-alive proof) ----------
+  setInterval(function () {
+    log('PULSE playing=' + stats.playing + ' errors=' + stats.errors +
+        ' loaded=' + stats.loaded + ' rotations=' + stats.rotations + ' state=' +
+        vms.map(function (v) { return v.readyState + '/' + (v.paused ? 'p' : 'r') + '/' + v.videoWidth; }).join(','));
+  }, 10000);
+})();
+</script>
+</body>
+</html>

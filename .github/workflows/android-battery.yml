@@ -1,6 +1,8 @@
-# android-battery.yml — hosted Android emulator browser stress battery (generic; sanitizer-build variant
-# with API-34 discrimination round: release-lane control (LANE input), /proc resource
-# sampler + guest ceilings, verified sweeper push, battery gated on a stable browser).
+# android-battery.yml — hosted Android emulator browser stress battery (v12: the Tier-B hunt
+# round — media-stress axis, targeted renderer/GPU kill drivers, probe-gate fix, and guest
+# overcommit instrumentation; sanitizer-build variant with API-34 discrimination round:
+# release-lane control (LANE input), /proc resource sampler + guest ceilings, verified
+# sweeper push, battery gated on a stable browser).
 #
 # Boots an Android 14 (API 34, google_apis x86_64) emulator with KVM on a hosted
 # Linux runner, with 8 GB guest RAM (high-RAM device class so RAM-gated mobile
@@ -48,7 +50,12 @@ env:
   CHROME_SNAPSHOT_REV: '1721527'   # release lane (previous battery generations)
   ASAN_ZIP_REV: '1663793'          # sanitizer-instrumented lane (x86_64; unstripped, symbol_level=1)
   RAM_MB: '8192'                   # guest RAM (high-RAM device class)
-  BATTERY_MODES: 'idle,loop,navonly,rot'  # full matrix + rotation surface-death variant
+# BATTERY_MODES (v12 hunt round): media = concurrent-H264 decode soak (no host churn);
+#   renderkill = kill renderer processes (sandboxed_process*) with media in flight — the
+#   SII-channel-drop → GPU-side stub-teardown race window; gpukill = kill the GPU process
+#   class (privileged_process) — the S19-style teardown, now targeted mid-decode; loop =
+#   navigation baseline. Legacy modes idle/navonly/rot remain supported via dispatch input.
+  BATTERY_MODES: 'media,renderkill,gpukill,loop'  # v12 Tier-B hunt matrix + nav baseline
   CYCLES: '60'
   DWELL_MS: '1000'                # loosened for the instrumented build's slowdown
   BG_HOLD_S: '3'
@@ -280,6 +287,19 @@ jobs:
           # /slow.png responses are delayed so page loads stay in-flight
           # across navigation commits)
           PORT=8791
+          # v12 media axis: generate the H264 test videos on-runner (ffmpeg is in the
+          # ubuntu-latest image; zero external deps). Two variants so element rotation
+          # alternates sources; baseline profile = widest MediaCodec support.
+          command -v ffmpeg >/dev/null 2>&1 || { echo "FFMPEG-ABSENT — the media axis cannot run"; exit 77; }
+          ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i testsrc2=duration=140:size=640x360:rate=24 \
+            -pix_fmt yuv420p -c:v libx264 -profile:v baseline -movflags +faststart \
+            "$GITHUB_WORKSPACE/stress/media_a.mp4"
+          ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i testsrc2=duration=90:size=480x270:rate=24 \
+            -pix_fmt yuv420p -c:v libx264 -profile:v baseline -movflags +faststart \
+            "$GITHUB_WORKSPACE/stress/media_b.mp4"
+          ls -la "$GITHUB_WORKSPACE/stress/" | grep -E "mp4|html"
           nohup python3 "$GITHUB_WORKSPACE/scripts/serve_slow.py" "$PORT" "$GITHUB_WORKSPACE/stress" > /tmp/httpserver.log 2>&1 &
           sleep 2
           curl -s -o /dev/null -w "http-server-selftest=%{http_code}\n" "http://localhost:$PORT/${{ env.PAGE }}"
@@ -409,7 +429,11 @@ jobs:
             timeout 20 adb pull /sdcard/probe_${VT}.png /tmp/battery/probe_${VT}.png >/dev/null 2>&1 || true
             echo "PROBE $VT VERDICT: alive_max=${ALIVE_MAX}s restarts=${RESTARTS} navstress=${NAV} gets=${GETS}" | tee -a /tmp/battery/probe_results.txt
             collect_forensics "$VT" || true
-            if [ "$ALIVE_MAX" -ge 45 ] && [ "$RESTARTS" -le 3 ] && [ "$NAV" -ge 1 ]; then
+            if [ "$ALIVE_MAX" -ge 45 ] && [ "$RESTARTS" -le 3 ] && [ "$GETS" -ge 1 ]; then
+              # v12 probe-gate fix: the page-load proof is the HTTP GET count, not the
+              # NAVSTRESS console count (the idle probe page structurally never logs
+              # NAVSTRESS — the pre-v12 gate could never pass on any lane; the battery
+              # never ran. GETS >= 1 = the page actually loaded.)
               echo "SURVIVOR=$VT" | tee -a /tmp/battery/probe_results.txt
             fi
             force_stop || true
@@ -419,9 +443,16 @@ jobs:
           echo "APP UID: $APPUID" | tee -a /tmp/battery/probe_results.txt
 
 
-          # guest-wide ceilings (one-shot)
+          # guest-wide ceilings (one-shot) — v12 adds the overcommit mechanism probe
+          # (the S34 closure's unnamed-blocker candidates): kernel overcommit policy +
+          # committed-memory accounting + the app-uid cgroup pids ceiling.
           { timeout 10 adb shell "cat /proc/sys/kernel/threads-max /proc/sys/kernel/pid_max /proc/sys/vm/max_map_count 2>/dev/null";
             timeout 10 adb shell "cat /sys/fs/cgroup/pids.max /sys/fs/cgroup/pids.current 2>/dev/null"; } | tee /tmp/battery/guest_ceilings.txt || true
+          { echo "--- v12 overcommit probe (S36-W1 rider) ---";
+            timeout 10 adb shell "cat /proc/sys/vm/overcommit_memory /proc/sys/vm/overcommit_ratio 2>/dev/null";
+            timeout 10 adb shell "grep -E '^(CommitLimit|Committed_AS|MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo 2>/dev/null";
+            echo "--- app-uid cgroup pids ceiling ---";
+            timeout 10 adb shell "APP_PID=\$(pgrep -f ${{ env.PACKAGE }} | head -1); CGP=\$(sed -n 's|^0::||p' /proc/\$APP_PID/cgroup 2>/dev/null | head -1); echo app_pid=\$APP_PID cgroup=\$CGP; cat /sys/fs/cgroup\$CGP/pids.max /sys/fs/cgroup\$CGP/pids.current 2>/dev/null; echo '--- uid/pid-level pids ceilings (glob) ---'; cat /sys/fs/cgroup/uid_*/pids.max /sys/fs/cgroup/uid_*/pid_*/pids.max 2>/dev/null | sort -u | head -8"; } | tee -a /tmp/battery/guest_ceilings.txt || true
 
           # V0 — baseline: feature override active, maps sweeper on (activation evidence)
           write_cmdline "$FEAT"
@@ -551,14 +582,58 @@ jobs:
           echo "BATTERY: modes=[$MODES] cycles=$CYCLES dwell=${{ env.DWELL_MS }}ms bg_hold=${{ env.BG_HOLD_S }}s fg_dwell=${{ env.FG_DWELL_S }}s"
           mkdir -p /tmp/battery
 
+          # v12 kill drivers + tombstone watcher -------------------------------------
+          # kill_class PATTERN LABEL CYC — kill -9 every process whose name matches
+          # :<PATTERN> (cap 4); log to the kill log + a logcat session marker.
+          kill_class() {
+            PATTERN="$1"; LABEL="$2"; CYC="$3"
+            PIDS=$(timeout 12 adb shell ps -A 2>/dev/null | awk -v pat=":${PATTERN}" '$NF ~ pat {print $2}' | head -4 | tr '\n' ' ' | sed 's/ *$//')
+            if [ -z "$PIDS" ]; then
+              echo "KILL-$LABEL cycle $CYC: NO-TARGET" | tee -a /tmp/battery/kill_log.txt
+              echo "=== KILL $LABEL cycle $CYC NO-TARGET ===" >> /tmp/logcat_full.log
+              return 0
+            fi
+            for p in $PIDS; do timeout 10 adb shell "kill -9 $p" 2>/dev/null || true; done
+            echo "=== KILL $LABEL cycle $CYC pids=[$PIDS] $(date -u +%T) ===" | tee -a /tmp/battery/kill_log.txt
+            echo "=== KILL $LABEL cycle $CYC pids=[$PIDS] ===" >> /tmp/logcat_full.log
+          }
+          # watch_tombstones LABEL CYC — dump the tombstone dir the moment its file
+          # count grows (tombstoned rotates; a mid-run dump preserves the evidence).
+          LAST_TS_COUNT=0
+          watch_tombstones() {
+            LABEL="$1"; CYC="$2"
+            TS_COUNT=$(timeout 10 adb shell "ls /data/tombstones/ 2>/dev/null | wc -l" 2>/dev/null | tr -d '\r' || echo 0)
+            TS_COUNT=${TS_COUNT:-0}
+            if [ "$TS_COUNT" -gt "$LAST_TS_COUNT" ]; then
+              timeout 25 adb shell "cat /data/tombstones/* 2>/dev/null" > /tmp/battery/tombstones_${LABEL}_c${CYC}.txt 2>&1 || true
+              echo "=== NEW-TOMBSTONE(S) $LABEL cycle $CYC count=$TS_COUNT ===" | tee -a /tmp/battery/kill_log.txt
+            fi
+            LAST_TS_COUNT=$TS_COUNT
+          }
+
+          # v12 page selection: the media-hunt modes run the media stress page.
+          page_for_mode() {
+            case "$1" in
+              media|renderkill|gpukill) echo "media-stress.html" ;;
+              *) echo "${{ env.PAGE }}" ;;
+            esac
+          }
+
           for MODE in $(echo "$MODES" | tr ',' ' '); do
             SESS="mode_${MODE}_$(date -u +%H%M%S)"
             echo "=== SESSION $SESS START $(date -u +%FT%TZ) ==="
             # session-scoped logcat marker
             echo "=== SESSION $SESS START ===" >> /tmp/logcat_full.log
 
-            # fresh launch at the mode URL
-            URL="http://localhost:${{ env.BATTERY_PORT }}/${{ env.PAGE }}?mode=${MODE}&fresh=1&dwell=${{ env.DWELL_MS }}"
+            # fresh launch at the mode URL (v12: mode-specific page; media modes get
+            # count/rotate params; renderkill/gpukill re-navigate per cycle)
+            MPAGE=$(page_for_mode "$MODE")
+            if [ "$MPAGE" = "media-stress.html" ]; then
+              URL="http://localhost:${{ env.BATTERY_PORT }}/${MPAGE}?count=3&rotate=8&fresh=1"
+            else
+              URL="http://localhost:${{ env.BATTERY_PORT }}/${{ env.PAGE }}?mode=${MODE}&fresh=1&dwell=${{ env.DWELL_MS }}"
+            fi
+            echo "SESSION $SESS page=$MPAGE url=$URL"
             timeout 25 adb shell am start -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "$URL" 2>&1 | tail -2
             sleep 5
             # first-run can re-surface on a fresh profile until fully completed —
@@ -589,7 +664,27 @@ jobs:
             fi
             for c in $(seq 1 "$CYCLES"); do
               echo "cycle $c/ $CYCLES [$(date -u +%T)]"
-              if [ "$MODE" = "rot" ]; then
+              if [ "$MODE" = "renderkill" ]; then
+                # v12: fresh navigation (new renderer + fresh decode session), let
+                # decode start, then kill the renderer class — the SII channel drop
+                # is the GPU-side stub-teardown trigger with media CSIs in flight.
+                timeout 25 adb shell am start -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "${URL}&i=$c" >/dev/null 2>&1 || true
+                sleep 6
+                kill_class "sandboxed_process" "RENDERER" "$c"
+                sleep 4
+                watch_tombstones "renderkill" "$c" || true
+              elif [ "$MODE" = "gpukill" ]; then
+                # v12: kill the GPU process class mid-decode (S19-style teardown,
+                # targeted); the browser respawns it on demand and decode resumes.
+                sleep 10
+                kill_class "privileged_process" "GPU" "$c"
+                sleep 4
+                watch_tombstones "gpukill" "$c" || true
+              elif [ "$MODE" = "media" ]; then
+                # v12: pure decode soak — no host churn; the page rotates its own
+                # elements (fresh decode sessions every rotate=8 s).
+                sleep 15
+              elif [ "$MODE" = "rot" ]; then
                 sleep "${{ env.FG_DWELL_S }}"
                 TARGET=$(( (c % 2) ))
                 timeout 15 adb shell settings put system user_rotation "$TARGET" || true
@@ -634,8 +729,8 @@ jobs:
             # snapshot the logcat-so-far for this session
             awk "/=== SESSION $SESS START ===/,/=== SESSION $SESS END ===/" /tmp/logcat_full.log > /tmp/battery/${SESS}_logcat.txt || true
             timeout 20 adb logcat -d -b crash > /tmp/battery/${SESS}_crash.txt 2>&1 || true
-            # session console lines
-            grep -a "NAVSTRESS" /tmp/battery/${SESS}_logcat.txt > /tmp/battery/${SESS}_console.txt || true
+            # session console lines (v12: media + kill markers alongside nav)
+            grep -aE "NAVSTRESS|MEDIASTRESS|=== KILL" /tmp/battery/${SESS}_logcat.txt > /tmp/battery/${SESS}_console.txt || true
             echo "=== SESSION $SESS END $(date -u +%FT%TZ) — console lines: $(wc -l < /tmp/battery/${SESS}_console.txt 2>/dev/null || echo 0) ==="
           done
 
