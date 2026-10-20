@@ -302,6 +302,37 @@ jobs:
           timeout 15 adb reverse "tcp:$PORT" "tcp:$PORT" && echo "ADB-REVERSE-OK port $PORT"
           echo "BATTERY_PORT=$PORT" >> "$GITHUB_ENV"
 
+      - name: Warm profile (first-run dismissal; v12.2 — the probe never dismissed FirstRunActivity so the URL intent never loaded and the battery could not fire on any fresh profile)
+        timeout-minutes: 8
+        run: |
+          set -uo pipefail
+          PAGE_URL="http://localhost:${{ env.BATTERY_PORT }}/${{ env.PAGE }}?mode=idle&fresh=1"
+          timeout 40 adb shell am start -W -n ${{ env.PACKAGE }}/${{ env.ACTIVITY }} -d "$PAGE_URL" >/dev/null 2>&1 || true
+          sleep 8
+          # dismissal rounds (the battery's own logic, reused): uiautomator dump -> find FRE button -> tap
+          for round in 1 2 3 4 5; do
+            FRE=$(timeout 20 adb shell "dumpsys activity activities | grep -c 'firstrun.FirstRunActivity'" 2>/dev/null | tr -d '\r' || true)
+            echo "warmup round ${round}: FirstRunActivity present=${FRE:-0}"
+            if [ "${FRE:-0}" = "0" ]; then break; fi
+            timeout 20 adb shell uiautomator dump /sdcard/ui_dump.xml >/dev/null 2>&1 || true
+            timeout 20 adb pull /sdcard/ui_dump.xml /tmp/ui_dump_warm.xml >/dev/null 2>&1 || true
+            BTN=$(python3 "$GITHUB_WORKSPACE/scripts/find_fre_button.py" /tmp/ui_dump_warm.xml 2>/dev/null || true)
+            if [ -n "$BTN" ]; then
+              echo "warmup round ${round}: tapping $BTN"
+              timeout 15 adb shell input tap $BTN
+              sleep 4
+            else
+              sleep 3
+            fi
+          done
+          # page-load proof on the warmed profile: the server must have seen the fetch
+          sleep 6
+          WGETS=$(grep -ac "GET " /tmp/httpserver.log 2>/dev/null || true)
+          echo "WARMUP-GETS=${WGETS:-0} (server log lines so far)"
+          timeout 20 adb shell am force-stop ${{ env.PACKAGE }} || true
+          sleep 3
+          echo "WARMUP-DONE $(date -u +%FT%TZ)"
+
       - name: Startup probe + API-34 last-words round (wrap stderr, ASAN verbosity, log-file, sweeper)
         timeout-minutes: 45
         run: |
@@ -448,7 +479,7 @@ jobs:
             timeout 10 adb shell "cat /proc/sys/vm/overcommit_memory /proc/sys/vm/overcommit_ratio 2>/dev/null";
             timeout 10 adb shell "grep -E '^(CommitLimit|Committed_AS|MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo 2>/dev/null";
             echo "--- app-uid cgroup pids ceiling ---";
-            timeout 10 adb shell "APP_PID=\$(pgrep -f ${{ env.PACKAGE }} | head -1); CGP=\$(sed -n 's|^0::||p' /proc/\$APP_PID/cgroup 2>/dev/null | head -1); echo app_pid=\$APP_PID cgroup=\$CGP; cat /sys/fs/cgroup\$CGP/pids.max /sys/fs/cgroup\$CGP/pids.current 2>/dev/null; echo '--- uid/pid-level pids ceilings (glob) ---'; cat /sys/fs/cgroup/uid_*/pids.max /sys/fs/cgroup/uid_*/pid_*/pids.max 2>/dev/null | sort -u | head -8"; } | tee -a /tmp/battery/guest_ceilings.txt || true
+            timeout 10 adb shell "echo app_uid=$APPUID; ls -d /sys/fs/cgroup/uid_\$APPUID/pid_* 2>/dev/null | head -3; cat /sys/fs/cgroup/uid_\$APPUID/pid_*/pids.max /sys/fs/cgroup/uid_\$APPUID/pid_*/pids.current 2>/dev/null | head -6; echo '--- uid-level pids ceilings ---'; cat /sys/fs/cgroup/uid_\$APPUID/pids.max /sys/fs/cgroup/uid_\$APPUID/pids.current 2>/dev/null"; } | tee -a /tmp/battery/guest_ceilings.txt || true
 
           # V0 — baseline: feature override active, maps sweeper on (activation evidence)
           write_cmdline "$FEAT"
