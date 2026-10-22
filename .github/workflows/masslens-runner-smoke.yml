@@ -1,0 +1,31 @@
+name: MassLens public runner smoke test
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/masslens-runner-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: masslens-runner-smoke
+  cancel-in-progress: true
+
+jobs:
+  runner-smoke:
+    name: Verify hosted runner and basic toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Confirm runner is available
+        run: |
+          echo "MassLens public runner smoke test"
+          echo "This workflow does not access or test the private Masslens repository."
+          echo "No private source, credentials, or datasets should be added here."
+      - name: Check basic tools
+        run: |
+          git --version
+          node --version
+          npm --version
